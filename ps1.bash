@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# ~/.bash_theme
+#####################################################################
+# Bash Theme — Riley Oest (Ayu-inspired, modern dev UX)
+#####################################################################
+#
+# Prompt layout:
+#   (base) riley@host ~/path branch          2 staged  3 modified ✨ 🔼2 [5/5 ✅ 1d]
+#   $
+#
+# Left side (PS1): conda env, user@host, path, git branch
+# Right side (PROMPT_COMMAND): dirty state, sync, GH Actions
+#
+# Emoji reference:
+#   ✅  All workflows passed        🔼  Ahead (needs push)
+#   ❌  Workflow(s) failed          🔽  Behind (needs pull)
+#   ⏳  Workflows running           🔄  Diverged (ahead AND behind)
+#   ✨  Untracked files
+
+# ─── Conda ──────────────────────────────────────────────────────────
+# Prevent Conda from messing with the prompt colors we built
+export CONDA_CHANGEPS1=false
+
+__conda_env() {
+  if [[ -n "$CONDA_DEFAULT_ENV" ]]; then
+    printf "\033[38;5;141m(%s)\033[0m " "$CONDA_DEFAULT_ENV"
+  fi
+}
+
+# ─── Git branch (for left side of PS1) ─────────────────────────────
+__git_branch_ps1() {
+  local branch
+  branch=$(git symbolic-ref --short HEAD 2>/dev/null) || \
+  branch=$(git rev-parse --short HEAD 2>/dev/null) || return
+  printf " \033[38;5;215m%s\033[0m" "$branch"
+}
+
+# ─── Git right side (dirty state + sync) ───────────────────────────
+__git_right() {
+  git rev-parse --is-inside-work-tree &>/dev/null || return
+
+  local parts=""
+
+  # Staged files (ready to commit)
+  local staged
+  staged=$(git diff --cached --numstat 2>/dev/null | wc -l)
+  (( staged > 0 )) && parts+="\033[38;5;150m${staged} staged\033[0m  "
+
+  # Modified files (not yet staged)
+  local modified
+  modified=$(git diff --numstat 2>/dev/null | wc -l)
+  (( modified > 0 )) && parts+="\033[38;5;203m${modified} modified\033[0m  "
+
+  # Untracked files
+  local untracked
+  untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -1)
+  [[ -n "$untracked" ]] && parts+="✨  "
+
+  # Upstream sync
+  local upstream
+  upstream=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+  if [[ -n "$upstream" ]]; then
+    local counts
+    counts=$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)
+    local ahead behind
+    ahead=$(echo "$counts" | awk '{print $1}')
+    behind=$(echo "$counts" | awk '{print $2}')
+
+    if (( ahead > 0 && behind > 0 )); then
+      parts+="🔄${ahead}/${behind}  "
+    elif (( ahead > 0 )); then
+      parts+="🔼${ahead}  "
+    elif (( behind > 0 )); then
+      parts+="🔽${behind}  "
+    fi
+  fi
+
+  [[ -n "$parts" ]] && printf "%b" "$parts"
+}
+
+# ─── Shared time helpers ─────────────────────────────────────────────
+# Used by PS1, gha-ui, gh-ui, gpr for consistent timestamps.
+
+# __parse_iso_epoch <iso_timestamp>
+# Converts ISO 8601 timestamp to epoch. Handles GNU + BSD date.
+# Normalizes both Z and +00:00 suffixes.
+__parse_iso_epoch() {
+  local iso="$1"
+  [[ -z "$iso" || "$iso" == "null" ]] && return 1
+  # Normalize +00:00 → Z for BSD date
+  iso="${iso%+00:00}Z"
+  iso="${iso%%ZZ}Z"
+  if date -d "$iso" +%s &>/dev/null 2>&1; then
+    date -d "$iso" +%s
+  else
+    date -jf "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null || return 1
+  fi
+}
+
+# __relative_time <iso_timestamp> [now_epoch]
+# Returns: now / 2m / 1h / 3d / 2w
+__relative_time() {
+  local epoch
+  epoch=$(__parse_iso_epoch "$1") || return
+  local now="${2:-$(date +%s)}"
+  local age=$(( now - epoch ))
+  if (( age < 60 )); then
+    printf "now"
+  elif (( age < 3600 )); then
+    printf "%dm" $(( age / 60 ))
+  elif (( age < 86400 )); then
+    printf "%dh" $(( age / 3600 ))
+  elif (( age < 604800 )); then
+    printf "%dd" $(( age / 86400 ))
+  else
+    printf "%dw" $(( age / 604800 ))
+  fi
+}
+
+# __duration_str <start_iso> <end_iso>
+# Returns: 2m15s / 8s / empty on error
+__duration_str() {
+  local s_epoch c_epoch
+  s_epoch=$(__parse_iso_epoch "$1") || return
+  c_epoch=$(__parse_iso_epoch "$2") || return
+  if (( c_epoch > s_epoch )); then
+    local dur=$(( c_epoch - s_epoch ))
+    if (( dur >= 60 )); then
+      printf "%dm%ds" $(( dur / 60 )) $(( dur % 60 ))
+    else
+      printf "%ds" "$dur"
+    fi
+  fi
+}
+
+# __local_time <iso_timestamp>
+# Returns HH:MM in system local timezone
+__local_time() {
+  local epoch
+  epoch=$(__parse_iso_epoch "$1") || return
+  if date -d "@$epoch" +%H:%M &>/dev/null 2>&1; then
+    date -d "@$epoch" +%H:%M
+  else
+    date -jf "%s" "$epoch" +%H:%M 2>/dev/null
+  fi
+}
+
+# ─── GitHub Actions (opt-in: export GH_PROMPT=1) ───────────────────
+#
+# Only displays for repos that HAVE workflows.
+# Background refresh every 60s — never blocks prompt.
+# Timestamp = when the workflow actually ran (not cache age).
+export GH_PROMPT=1
+
+__gh_actions() {
+  [[ "$GH_PROMPT" != "1" ]] && return
+  git rev-parse --is-inside-work-tree &>/dev/null || return
+
+  command -v gh &>/dev/null || return
+  command -v jq &>/dev/null || return
+
+  local cache_dir="/tmp/gh_status_cache"
+  mkdir -p "$cache_dir" 2>/dev/null
+
+  local hash
+  if command -v md5sum &>/dev/null; then
+    hash=$(pwd | md5sum | cut -d' ' -f1)
+  else
+    hash=$(pwd | md5 -q)
+  fi
+  local cache_file="${cache_dir}/${hash}"
+  local pending_file="${cache_dir}/${hash}.pending"
+
+  local now
+  now=$(date +%s)
+  local mtime
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    mtime=$(stat -f %m "$cache_file" 2>/dev/null || echo 0)
+  else
+    mtime=$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+  fi
+
+  # ─── Background refresh ─────────────────────────────────────────
+  if (( now - mtime > 60 )) && [[ ! -f "$pending_file" ]]; then
+    touch "$pending_file"
+
+    (
+      local repo sha result
+      repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+      sha=$(git rev-parse HEAD 2>/dev/null)
+
+      result=$(gh api "repos/${repo}/commits/${sha}/check-runs" 2>/dev/null)
+
+      if [[ -n "$result" ]]; then
+        local total succeeded failed running skipped last_run_iso last_run_epoch
+
+        total=$(echo "$result" | jq '.check_runs | length')
+
+        if (( total > 0 )); then
+          succeeded=$(echo "$result" | jq '[.check_runs[] | select(.conclusion=="success")] | length')
+          failed=$(echo "$result" | jq '[.check_runs[] | select(.conclusion=="failure")] | length')
+          running=$(echo "$result" | jq '[.check_runs[] | select(.status=="queued" or .status=="in_progress")] | length')
+          skipped=$(echo "$result" | jq '[.check_runs[] | select(.conclusion=="skipped")] | length')
+
+          last_run_iso=$(echo "$result" | jq -r '.check_runs[0].completed_at // .check_runs[0].started_at // empty')
+
+          # Determine symbol
+          local sym_key="ok"
+          (( running > 0 )) && sym_key="run"
+          (( failed > 0 )) && sym_key="fail"
+
+          printf "%s|%s|%s|%s|%s" \
+            "$succeeded" "$total" "$sym_key" "$last_run_iso" "$skipped" \
+            > "$cache_file"
+        else
+          rm -f "$cache_file"
+        fi
+      else
+        rm -f "$cache_file"
+      fi
+
+      rm -f "$pending_file"
+    ) & disown
+  fi
+
+  # ─── Display ────────────────────────────────────────────────────
+  if [[ -f "$cache_file" ]]; then
+    local s t sym_key run_iso skipped
+    IFS='|' read -r s t sym_key run_iso skipped < "$cache_file"
+
+    [[ -z "$s" || -z "$t" ]] && return
+
+    local emoji
+    case "$sym_key" in
+      ok)   emoji="✅" ;;
+      fail) emoji="❌" ;;
+      run)  emoji="⏳" ;;
+      *)    emoji="✅" ;;
+    esac
+
+    local age_str=""
+    age_str=$(__relative_time "$run_iso" "$now")
+
+    local skipped_str=""
+    (( skipped > 0 )) && skipped_str=" (${skipped} skipped)"
+
+    printf "\033[38;5;250m[%s/%s %s%s %s]\033[0m" \
+      "$s" "$t" "$emoji" "$skipped_str" "$age_str"
+  fi
+}
+
+# ─── Right-aligned prompt ───────────────────────────────────────────
+#
+# PROMPT_COMMAND prints the right side at the right edge using ANSI
+# cursor positioning (\033[{col}G), then carriage return (\r) so
+# PS1 overwrites from column 0. This avoids the printf + \u conflict.
+
+__count_emoji() {
+  local str="$1" count=0
+  # Each known emoji is double-width in the terminal.
+  # Subtract occurrences from the string to count them.
+  local e
+  for e in "✅" "❌" "⏳" "🔄" "✨" "🔼" "🔽"; do
+    local tmp="${str//"$e"/}"
+    local char_len=${#e}
+    if (( char_len > 0 )); then
+      local diff=$(( ${#str} - ${#tmp} ))
+      (( diff > 0 )) && count=$(( count + diff / char_len ))
+    fi
+    str="$tmp"
+  done
+  echo "$count"
+}
+
+__render_right_side() {
+  local git_right gh_actions
+  git_right="$(__git_right)"
+  gh_actions="$(__gh_actions)"
+
+  local right=""
+  [[ -n "$git_right" ]] && right+="$git_right"
+  [[ -n "$gh_actions" ]] && right+="$gh_actions"
+
+  # Strip ANSI to measure visible width
+  local right_clean
+  right_clean=$(echo -ne "$right" | sed 's/\x1b\[[0-9;]*m//g')
+
+  # Nothing to render
+  [[ -z "$right_clean" || "$right_clean" =~ ^[[:space:]]*$ ]] && return
+
+  local cols
+  cols=$(tput cols)
+
+  # Compensate for double-width emoji
+  local emoji_count
+  emoji_count=$(__count_emoji "$right_clean")
+  local right_len=$(( ${#right_clean} + emoji_count ))
+
+  if (( right_len > 0 && right_len < cols )); then
+    local pos=$(( cols - right_len ))
+    printf "\033[%dG" "$pos"
+    printf "%b" "$right"
+    printf "\r"
+  fi
+}
+
+PROMPT_COMMAND=__render_right_side
+
+# PS1: left side + second line
+# Branch is on the left after the path. White dollar sign.
+PS1='$(__conda_env)\[\033[38;5;75m\]\u@\h\[\033[0m\] \[\033[38;5;110m\]\w\[\033[0m\]$(__git_branch_ps1)\n\$ '
+
+# ─── LS_COLORS (Ayu palette) ──────────────────────────────────────
+export LS_COLORS="\
+di=1;38;5;75:\
+ln=38;5;110:\
+so=38;5;141:\
+pi=38;5;141:\
+ex=38;5;150:\
+bd=38;5;215:\
+cd=38;5;215:\
+su=38;5;203:\
+sg=38;5;203:\
+tw=38;5;214:\
+ow=38;5;214:\
+*.py=38;5;214:\
+*.lua=38;5;75:\
+*.js=38;5;215:\
+*.ts=38;5;215:\
+*.jsx=38;5;215:\
+*.tsx=38;5;215:\
+*.cs=38;5;75:\
+*.json=38;5;180:\
+*.yaml=38;5;180:\
+*.yml=38;5;180:\
+*.toml=38;5;180:\
+*.md=38;5;110:\
+*.sh=38;5;150:\
+*.bash=38;5;150:\
+*.css=38;5;110:\
+*.html=38;5;203:\
+*.sql=38;5;75:\
+*.xml=38;5;110:\
+*.gitignore=38;5;243:\
+*.env=38;5;243:\
+*.log=38;5;243:\
+*.tar=38;5;203:\
+*.gz=38;5;203:\
+*.zip=38;5;203:\
+*.7z=38;5;203:\
+"
+export EZA_COLORS="$LS_COLORS"
+
+# ─── Grep colors ──────────────────────────────────────────────────
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+
+# ─── Man page colors ──────────────────────────────────────────────
+export LESS='-R'
+export LESS_TERMCAP_mb=$'\e[38;5;203m'
+export LESS_TERMCAP_md=$'\e[38;5;75m'
+export LESS_TERMCAP_me=$'\e[0m'
+export LESS_TERMCAP_so=$'\e[38;5;215;48;5;236m'
+export LESS_TERMCAP_se=$'\e[0m'
+export LESS_TERMCAP_us=$'\e[38;5;110m'
+export LESS_TERMCAP_ue=$'\e[0m'
+
+# ─── Git / GCC ────────────────────────────────────────────────────
+export GIT_PAGER='less -FRX'
+export GCC_COLORS='error=01;38;5;203:warning=01;38;5;215:note=01;38;5;110:caret=01;38;5;75:locus=01:quote=01'
+
+#####################################################################
+# End Theme
+#####################################################################
+
