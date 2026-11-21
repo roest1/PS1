@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The prompt has to work on the distros it is used on, so the checks run in
+  # their containers rather than on the runner's Ubuntu.
+  prompt:
+    name: prompt (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: fedora 45, container: "fedora:45" }
+          - { name: rhel 9,    container: "almalinux:9" }
+          - { name: rhel 10,   container: "almalinux:10" }
+    steps:
+      - name: Container prerequisites
+        run: dnf install -y git
+      - uses: actions/checkout@v7
+
+      - name: Parses
+        run: bash -n ps1.bash
+
+      # Anything printed at source time lands in every new shell.
+      - name: Sources without output
+        run: |
+          out=$(bash --norc --noprofile -c 'source ./ps1.bash' 2>&1)
+          [ -z "$out" ] || { echo "noisy when sourced:"; echo "$out"; exit 1; }
+
+      # A real repo with each dirty state, rendered the way bash renders it:
+      # __prompt_render fills __PS1_GIT and prints the right side. No gh here,
+      # so the GitHub segments must drop out rather than error.
+      - name: Renders a dirty repo, and nothing outside one
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d); cd "$t"
+          git init -q -b main r && cd r
+          git config user.name ci; git config user.email ci@example.invalid
+          echo a > a; echo b > b; git add a b; git commit -qm init
+          echo staged > a; git add a; echo unstaged > b; echo new > c
+          src="$GITHUB_WORKSPACE/ps1.bash"
+          out=$(COLUMNS=200 bash --norc --noprofile -c "source '$src'; __prompt_render; printf '\nLEFT=%s\n' \"\$__PS1_GIT\"" 2>&1)
+          plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*[mG]//g; s/[\x01\x02\r]//g')
+          echo "$plain"
+          for want in main '1 staged' '1 unstaged' '1 untracked'; do
+            grep -qF "$want" <<<"$plain" || { echo "missing: $want"; exit 1; }
+          done
+          if grep -qiE 'command not found|error|syntax' <<<"$plain"; then exit 1; fi
+          cd /
+          out=$(bash --norc --noprofile -c "source '$src'; __prompt_render; printf 'LEFT=%s' \"\$__PS1_GIT\"")
+          [ "$out" = "LEFT=" ] || { echo "outside a repo, the prompt still drew: $out"; exit 1; }
+          echo "ok"
+
+      # The caches must never be a fixed name in a shared /tmp (see ps1.bash).
+      - name: No cache in a shared /tmp
+        run: |
+          if grep -nE '"/tmp/|=/tmp/' ps1.bash; then
+            echo "a cache path points into /tmp"; exit 1
+          fi
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck --severity=warning ps1.bash
