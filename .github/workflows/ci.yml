@@ -73,3 +73,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: shellcheck --severity=warning ps1.bash
+
+  # The one check the main ruleset requires, so adding or renaming a job above
+  # never means editing the ruleset. `if: always()` so a failed or skipped
+  # dependency fails this instead of leaving it pending forever.
+  ci-ok:
+    name: ci ok
+    if: always()
+    needs: [prompt, shellcheck]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done

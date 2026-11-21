@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ps1.bash — a git and GitHub aware bash prompt. https://github.com/roest1/ps1
+# ps1.bash — a git and GitHub aware bash prompt. https://github.com/roest1/PS1
 #
 # Source it from ~/.bashrc. Bash 5; git required; gh and jq optional.
 #
@@ -88,8 +88,7 @@ __C_OFF=$'\033[0m'
 __NP_ON=$'\001'
 __NP_OFF=$'\002'
 
-# ─── Shared time helpers ─────────────────────────────────────────────
-# Used by PS1 and by the github screens for consistent timestamps.
+# ─── Time helpers ───────────────────────────────────────────────────
 
 # __parse_iso_epoch <iso_timestamp>
 # Converts ISO 8601 timestamp to epoch. Handles GNU + BSD date.
@@ -109,11 +108,9 @@ __parse_iso_epoch() {
 
 # __relative_age <out_var> <epoch> <now_epoch>
 # Formats an age as now / 2m / 1h / 3d / 2w into a variable, in pure bash.
-# This is the prompt's path, and the reason it exists separately from
-# __relative_time: going through that instead costs 1631us per prompt —
-# two nested $( ) wrapped around two `date` execs — to produce the exact
-# same string this produces in 66us. `printf -v` is bash 3.1+, so no
-# version guard is needed.
+# Pure bash on purpose: an ISO-string version wrapping two `date` execs in
+# $( ) cost 1631us per prompt to produce the same string this does in
+# 66us. `printf -v` is bash 3.1+, so no version guard is needed.
 #
 # The local is __ra_secs, not the obvious `age`, because bash locals are
 # dynamically scoped: a caller doing `__relative_age age ...` would have
@@ -126,45 +123,6 @@ __relative_age() {
   elif (( __ra_secs < 86400 ));  then printf -v "$1" "%dh" $(( __ra_secs / 3600 ))
   elif (( __ra_secs < 604800 )); then printf -v "$1" "%dd" $(( __ra_secs / 86400 ))
   else                                printf -v "$1" "%dw" $(( __ra_secs / 604800 ))
-  fi
-}
-
-# __relative_time <iso_timestamp> [now_epoch]
-# Returns: now / 2m / 1h / 3d / 2w
-# The ISO-string front door, for callers that are already paying for a
-# `gh api` round trip and so cannot care about a `date` fork.
-__relative_time() {
-  local epoch out
-  epoch=$(__parse_iso_epoch "$1") || return
-  __relative_age out "$epoch" "${2:-$(date +%s)}"
-  printf "%s" "$out"
-}
-
-# __duration_str <start_iso> <end_iso>
-# Returns: 2m15s / 8s / empty on error
-__duration_str() {
-  local s_epoch c_epoch
-  s_epoch=$(__parse_iso_epoch "$1") || return
-  c_epoch=$(__parse_iso_epoch "$2") || return
-  if (( c_epoch > s_epoch )); then
-    local dur=$(( c_epoch - s_epoch ))
-    if (( dur >= 60 )); then
-      printf "%dm%ds" $(( dur / 60 )) $(( dur % 60 ))
-    else
-      printf "%ds" "$dur"
-    fi
-  fi
-}
-
-# __local_time <iso_timestamp>
-# Returns HH:MM in system local timezone
-__local_time() {
-  local epoch
-  epoch=$(__parse_iso_epoch "$1") || return
-  if date -d "@$epoch" +%H:%M &>/dev/null 2>&1; then
-    date -d "@$epoch" +%H:%M
-  else
-    date -jf "%s" "$epoch" +%H:%M 2>/dev/null
   fi
 }
 
