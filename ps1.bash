@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# ~/.bash_theme
-#####################################################################
-# Bash Theme — Riley Oest (Ayu-inspired, modern dev UX)
-#####################################################################
+# ps1.bash — a git and GitHub aware bash prompt. https://github.com/roest1/ps1
+#
+# Source it from ~/.bashrc. Bash 5; git required; gh and jq optional.
 #
 # Prompt layout:
-#   (base) riley@host ~/path 🌍 branch 🛡️   2 staged  3 unstaged  1 untracked  🔼2 [5/5 ✅ 1d]
+#   (base) you@host ~/path 🌍 branch 🛡️   2 staged  3 unstaged  1 untracked  🔼2 [5/5 ✅ 1d]
 #   $
 #
 # Left side (PS1): conda env, user@host, path, repo visibility, git
@@ -32,7 +31,7 @@
 #
 # ─── One process per prompt ─────────────────────────────────────────
 #
-# Everything below is shaped by one measurement. On WSL2 a subshell fork
+# Everything below is shaped by one measurement. On WSL2, a subshell fork
 # costs ~200us, a fork+exec ~440us, and forking `git` ~900us. This prompt
 # used to spend roughly fifty processes and ~19ms per Enter — of which
 # about 1ms was git doing actual work. The cost was never the work, it
@@ -199,7 +198,9 @@ __cache_run() {
   # Made here rather than at source time, where it would fork once in
   # every shell that ever starts to create a directory that outlives the
   # first one. Until it exists the reads simply miss.
-  mkdir -p "$dir" 2>/dev/null
+  # umask, not `mkdir -m`: -m applies to the last directory only. This
+  # runs in the detached refresh, so the subshell costs the prompt nothing.
+  (umask 077 && mkdir -p "$dir") 2>/dev/null
 
   "$fn" "$cache_file" "$@"
 
@@ -275,14 +276,23 @@ __cache_get() {
   return 0
 }
 
-# ─── GitHub Actions (opt-in: export GH_PROMPT=1) ───────────────────
+# ─── Where the caches live ──────────────────────────────────────────
+# Per user, never a fixed name in /tmp. A shared /tmp lets any other
+# account create /tmp/gh_status_cache first and fill it: this prompt would
+# then print their bytes -- terminal escapes included -- into yours, and
+# feed their fields to its arithmetic. XDG_RUNTIME_DIR is the user's own
+# 0700 tmpfs on systemd machines, cleared at logout like /tmp; the cache
+# directory is the fallback where there is none.
+__PS1_CACHE_ROOT="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/ps1"
+
+# ─── GitHub Actions (on by default; export GH_PROMPT=0 to hide) ─────
 #
 # Only displays for repos that HAVE workflows.
 # Background refresh every 60s — never blocks prompt.
 # Timestamp = when the workflow actually ran (not cache age).
-export GH_PROMPT=1
+export GH_PROMPT="${GH_PROMPT:-1}"
 
-__GH_CACHE_DIR="/tmp/gh_status_cache"
+__GH_CACHE_DIR="$__PS1_CACHE_ROOT/gh_status"
 __GH_TTL=60           # seconds before a cached answer is refreshed
 
 # Cache file: succeeded|total|symbol|run_epoch|skipped|fetch_epoch
@@ -361,7 +371,7 @@ __gh_segment() {
 
   # Both of these reach `(( ))` below, and a cache entry written by an
   # OLDER version of this file will not have the shape this one expects.
-  # That is not hypothetical: /tmp still holds entries from before
+  # That is not hypothetical: the old /tmp caches held entries from before
   # run_epoch became an integer, and feeding one of those to the
   # arithmetic prints
   #
@@ -420,7 +430,7 @@ __gh_segment() {
 # throw away a still-correct answer on every commit and re-ask GitHub for
 # it. The worktree is in the key because two worktrees of one repo can
 # sit on different branches, and a submodule's visibility is its own.
-__GH_REPO_CACHE_DIR="/tmp/gh_repo_cache"
+__GH_REPO_CACHE_DIR="$__PS1_CACHE_ROOT/gh_repo"
 __GH_REPO_TTL=300      # visibility and protection rules both change rarely
 
 # Named so swapping one is a one-line edit. 🌍 and 🔒 are East Asian Wide
@@ -545,7 +555,7 @@ __repo_meta_segment() {
 # the same background-cache shape as the two segments above.
 #
 # Cache file: conflicted_files|fetch_epoch
-__GIT_MERGE_CACHE_DIR="/tmp/git_merge_cache"
+__GIT_MERGE_CACHE_DIR="$__PS1_CACHE_ROOT/git_merge"
 __GIT_MERGE_TTL=300
 
 # __merge_refresh <cache_file> <upstream>
@@ -835,8 +845,8 @@ __prompt_render() {
   # TERMINAL; it never knew the left side existed, so a busy repo in a
   # 95-column window overwrote its own status line.
   #
-  # $COLUMNS is maintained by bash itself (bashrc sets `shopt -s
-  # checkwinsize`, and bash 5 defaults it on), which is why this does not
+  # $COLUMNS is maintained by bash itself (`shopt -s checkwinsize`,
+  # which bash 5 defaults on), which is why this does not
   # shell out to `tput cols`. It updates on resize, so the NEXT prompt
   # after dragging the window narrower is already fitted — the one on
   # screen is not redrawn, because readline only repaints its last line.
@@ -916,78 +926,12 @@ __prompt_render() {
 # called `$(rm -rf ~)` renders as those literal characters.
 PS1='${__PS1_CONDA}\[\033[38;5;75m\]\u@\h\[\033[0m\] \[\033[38;5;110m\]\w\[\033[0m\]${__PS1_GIT}\n\$ '
 
-# Append, do not assign. `zoxide init bash` — sourced later, from
-# bash_productivity — appends __zoxide_hook here, and that hook is the
-# only thing that teaches `z` where you have been. A plain
-# `PROMPT_COMMAND=` throws it away silently: no error, `z` simply stops
-# learning. That works today only because bashrc happens to source this
-# file first, which nothing states and nothing enforces. The guard is
-# zoxide's own, so `reload` re-sourcing into a live shell stays idempotent.
+# Prepend, do not assign. Other tools hook PROMPT_COMMAND too -- `zoxide
+# init bash` adds __zoxide_hook, the only thing that teaches `z` where you
+# have been -- and a plain `PROMPT_COMMAND=` would throw theirs away with no
+# error, in whichever order the two were sourced. The guard (zoxide's own
+# pattern) keeps re-sourcing this file into a live shell idempotent.
 case ";${PROMPT_COMMAND};" in
   *";__prompt_render;"*) : ;;
   *) PROMPT_COMMAND="__prompt_render${PROMPT_COMMAND:+;${PROMPT_COMMAND}}" ;;
 esac
-
-# ─── LS_COLORS (Ayu palette) ──────────────────────────────────────
-export LS_COLORS="\
-di=1;38;5;75:\
-ln=38;5;110:\
-so=38;5;141:\
-pi=38;5;141:\
-ex=38;5;150:\
-bd=38;5;215:\
-cd=38;5;215:\
-su=38;5;203:\
-sg=38;5;203:\
-tw=38;5;214:\
-ow=38;5;214:\
-*.py=38;5;214:\
-*.lua=38;5;75:\
-*.js=38;5;215:\
-*.ts=38;5;215:\
-*.jsx=38;5;215:\
-*.tsx=38;5;215:\
-*.cs=38;5;75:\
-*.json=38;5;180:\
-*.yaml=38;5;180:\
-*.yml=38;5;180:\
-*.toml=38;5;180:\
-*.md=38;5;110:\
-*.sh=38;5;150:\
-*.bash=38;5;150:\
-*.css=38;5;110:\
-*.html=38;5;203:\
-*.sql=38;5;75:\
-*.xml=38;5;110:\
-*.gitignore=38;5;243:\
-*.env=38;5;243:\
-*.log=38;5;243:\
-*.tar=38;5;203:\
-*.gz=38;5;203:\
-*.zip=38;5;203:\
-*.7z=38;5;203:\
-"
-export EZA_COLORS="$LS_COLORS"
-
-# ─── Grep colors ──────────────────────────────────────────────────
-alias grep='grep --color=auto'
-alias egrep='egrep --color=auto'
-alias fgrep='fgrep --color=auto'
-
-# ─── Man page colors ──────────────────────────────────────────────
-export LESS='-R'
-export LESS_TERMCAP_mb=$'\e[38;5;203m'
-export LESS_TERMCAP_md=$'\e[38;5;75m'
-export LESS_TERMCAP_me=$'\e[0m'
-export LESS_TERMCAP_so=$'\e[38;5;215;48;5;236m'
-export LESS_TERMCAP_se=$'\e[0m'
-export LESS_TERMCAP_us=$'\e[38;5;110m'
-export LESS_TERMCAP_ue=$'\e[0m'
-
-# ─── Git / GCC ────────────────────────────────────────────────────
-export GIT_PAGER='less -FRX'
-export GCC_COLORS='error=01;38;5;203:warning=01;38;5;215:note=01;38;5;110:caret=01;38;5;75:locus=01:quote=01'
-
-#####################################################################
-# End Theme
-#####################################################################
