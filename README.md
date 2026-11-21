@@ -1,4 +1,4 @@
-# ps1
+# PS1
 
 A bash prompt that knows about git and GitHub, in one file, with no framework or plugin
 manager. It costs one process per prompt.
@@ -10,7 +10,7 @@ manager. It costs one process per prompt.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/roest1/ps1/main/ps1.bash -o ~/.bash_prompt
+curl -fsSL https://raw.githubusercontent.com/roest1/PS1/main/ps1.bash -o ~/.bash_prompt
 echo '[ -f ~/.bash_prompt ] && source ~/.bash_prompt' >> ~/.bashrc
 exec bash
 ```
