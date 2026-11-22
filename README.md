@@ -15,7 +15,9 @@ echo '[ -f ~/.bash_prompt ] && source ~/.bash_prompt' >> ~/.bashrc
 exec bash
 ```
 
-To keep up with changes, clone the repo and source `ps1.bash` from the clone instead.
+To keep up with changes, clone the repo and source `ps1.bash` from the clone instead. For
+the GitHub markers and CI status, also install `gh` and `jq` and run `gh auth login`; see
+[Requirements](#requirements).
 
 ## What it shows
 
@@ -93,10 +95,21 @@ from one palette shared with the terminal and editor.
 
 ## Requirements
 
-Bash 5 and `git`. `gh` (logged in) and `jq` add the Actions status and the 🌍/🔒/🛡️
-markers; `GH_PROMPT=0` before sourcing turns those off. A color emoji font in the terminal,
-as above. Every tool is behind a
-`command -v` guard, so a missing one drops its segment instead of breaking the prompt.
+| Needs | For | Without it |
+|---|---|---|
+| bash 5, `git` | everything | — |
+| `gh`, **logged in** (`gh auth login`), and `jq` | 🌍 / 🔒 / 🛡️ and the `[11/11 ✅ 22h]` block | those parts are simply not drawn |
+| a color emoji font in the terminal | the emoji | boxes instead of emoji |
+
+`gh` answers nothing without a login, even for a public repo, so on a fresh machine the
+prompt shows only `user@host path branch` until you log in. On Fedora:
+`sudo dnf install gh jq && gh auth login`. `GH_PROMPT=0` before sourcing turns the GitHub
+parts off on purpose.
+
+**What appears, and when.** The right side lists only what is true: a clean, up-to-date
+clone has no `staged`/`untracked`/🔼 to show, so it is blank apart from the CI block.
+GitHub's answers are fetched in the background and arrive **one prompt later**: `cd` into a
+repo, press Enter once, and the markers and CI status appear.
 
 ## How it stays fast
 
