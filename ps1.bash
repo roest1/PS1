@@ -55,28 +55,97 @@
 # Prevent Conda from messing with the prompt colors we built
 export CONDA_CHANGEPS1=false
 
-# ─── Palette ────────────────────────────────────────────────────────
-# Real ESC bytes rather than the string "\033". Building the prompt from
-# actual control characters means `printf '%s'` is enough; the old code
-# needed `printf '%b'`, which also expands any backslash that happens to
-# be in the data it is printing.
-__C_CONDA=$'\033[38;5;141m'
-__C_BRANCH=$'\033[38;5;215m'
-__C_STAGED=$'\033[38;5;150m'
-__C_UNSTAGED=$'\033[38;5;203m'
+# ─── Colors and icons: the settings ────────────────────────────────
+# The public interface of this file. Set any of these BEFORE sourcing it;
+# they are read once, here, so changing one later needs a re-source.
+#
+#   PS1_COLOR_<NAME>   a 256-colour number (0-255) or a hex colour (#rrggbb)
+#   PS1_ICON_<NAME>    any string; empty hides that marker
+#   PS1_ICON_<NAME>_W  the columns it occupies, when the guess below is wrong
+#
+# Everything else in this file -- every __name -- is internal and may change.
+#
+# Colours become real ESC bytes rather than the string "\033": building the
+# prompt from actual control characters means `printf '%s'` is enough,
+# where `printf '%b'` would also expand any backslash in the data printed.
+#
+# A value that is neither form warns once on stderr and keeps the default,
+# rather than drawing garbage or silently ignoring a typo. 10# because a
+# leading zero would otherwise read as octal and `08` would be an error.
+__ps1_color() {  # <out var> <NAME> <default 0-255> [bold]
+  local n="PS1_COLOR_$2" v sgr
+  v="${!n:-$3}"
+  if [[ "$v" =~ ^[0-9]{1,3}$ ]] && (( 10#$v < 256 )); then
+    sgr="38;5;$((10#$v))"
+  elif [[ "$v" =~ ^#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$ ]]; then
+    sgr="38;2;$((16#${BASH_REMATCH[1]}));$((16#${BASH_REMATCH[2]}));$((16#${BASH_REMATCH[3]}))"
+  else
+    printf 'ps1: %s=%q is not 0-255 or #rrggbb; using %s\n' "$n" "$v" "$3" >&2
+    sgr="38;5;$3"
+  fi
+  printf -v "$1" '\033[%s%sm' "${4:+1;}" "$sgr"
+}
+
+# Width matters only for icons on the right side and for the fitting pass,
+# which add up visible columns as they build the line. bash cannot ask the
+# terminal how wide a glyph is, so: an explicit _W wins; plain ASCII is its
+# length; anything else is assumed to be one double-width glyph, which is
+# what the default emoji are. A Nerd Font or Material icon is usually ONE
+# column -- set its _W.
+__ps1_icon() {  # <out var> <width out var> <NAME> <default>
+  local n="PS1_ICON_$3" wn="PS1_ICON_$3_W" v w chars
+  if [[ -n "${!n+set}" ]]; then v="${!n}"; else v="$4"; fi
+  w="${!wn:-}"
+  printf -v "$1" '%s' "$v"
+  if [[ ! "$w" =~ ^[0-9]+$ ]]; then
+    # ASCII when its length in characters equals its length in bytes;
+    # the local LC_ALL makes ${#v} count bytes and is undone on return.
+    chars=${#v}
+    local LC_ALL=C
+    if (( chars == 0 )); then w=0
+    elif (( chars == ${#v} )); then w=$chars
+    else w=2
+    fi
+  fi
+  printf -v "$2" '%s' "$w"
+}
+
+__ps1_color __C_HOST      HOST      75
+__ps1_color __C_PATH      PATH      110
+__ps1_color __C_CONDA     CONDA     141
+__ps1_color __C_BRANCH    BRANCH    215
+__ps1_color __C_STAGED    STAGED    150
+__ps1_color __C_UNSTAGED  UNSTAGED  203
 # Deliberately the quietest of the three dirty-state colours. Untracked is
 # the least urgent of them — green is done, red is in progress, this is
 # merely not-yet-git's-problem — and it used to be rendered as ✨, the
 # loudest glyph on the line, which had the emphasis exactly backwards.
-__C_UNTRACKED=$'\033[38;5;180m'
-__C_GH=$'\033[38;5;250m'
-__C_WARN=$'\033[38;5;214m'
+__ps1_color __C_UNTRACKED UNTRACKED 180
+__ps1_color __C_GH        CI        250
+__ps1_color __C_WARN      WARN      214
 # The unstaged red, but bold. A predicted conflict is the same colour
 # family as "you have edits" because that is what it is about to become a
 # problem for, and it is the loudest thing on the line because it is the
 # only state here that costs an afternoon rather than a keystroke.
-__C_CONFLICT=$'\033[1;38;5;203m'
+__ps1_color __C_CONFLICT  CONFLICT  203 bold
 __C_OFF=$'\033[0m'
+
+# 🌍 and 🔒 are East Asian Wide; 🛡 is Neutral and needs the U+FE0F
+# variation selector to render as an emoji at all, so terminals draw it 2
+# columns wide while wcwidth() calls it 1. That mismatch is harmless for
+# the three left-side markers: they sit on the first line of a two-line
+# PS1, and readline measures only the text after the last newline when it
+# places the cursor. Moving any of them below the \n would make the width
+# lie matter — see the __NP_ON comment below for that class of bug.
+__ps1_icon __I_PUBLIC    __IW_PUBLIC    PUBLIC    "🌍"
+__ps1_icon __I_PRIVATE   __IW_PRIVATE   PRIVATE   "🔒"
+__ps1_icon __I_PROTECTED __IW_PROTECTED PROTECTED "🛡️"
+__ps1_icon __I_AHEAD     __IW_AHEAD     AHEAD     "🔼"
+__ps1_icon __I_BEHIND    __IW_BEHIND    BEHIND    "🔽"
+__ps1_icon __I_CI_PASS   __IW_CI_PASS   CI_PASS   "✅"
+__ps1_icon __I_CI_FAIL   __IW_CI_FAIL   CI_FAIL   "❌"
+__ps1_icon __I_CI_RUN    __IW_CI_RUN    CI_RUN    "⏳"
+unset -f __ps1_color __ps1_icon
 
 # \001 and \002 are what bash's \[ and \] decode to: "readline, the bytes
 # between these occupy no columns". They cannot be spelled \[ and \] in
@@ -346,11 +415,11 @@ __gh_segment() {
     '' | *[!0-9]*) skipped=0 ;;
   esac
 
-  local emoji
+  local emoji emoji_w
   case "$sym" in
-    fail) emoji="❌" ;;
-    run)  emoji="⏳" ;;
-    *)    emoji="✅" ;;
+    fail) emoji="$__I_CI_FAIL" emoji_w=$__IW_CI_FAIL ;;
+    run)  emoji="$__I_CI_RUN"  emoji_w=$__IW_CI_RUN ;;
+    *)    emoji="$__I_CI_PASS" emoji_w=$__IW_CI_PASS ;;
   esac
 
   local skipped_str=""
@@ -360,10 +429,9 @@ __gh_segment() {
   [[ -n "$run_epoch" ]] && __relative_age age "$run_epoch" "$now"
 
   __gh_out="${__C_GH}[${s}/${t} ${emoji}${skipped_str} ${age}]${__C_OFF}"
-  # Visible: [ s / t <space> emoji <skipped> <space> age ] — the two
-  # brackets, the slash and the two spaces are 5, and the emoji is East
-  # Asian Wide, so 2 columns for its 1 character.
-  __gh_w=$(( ${#s} + ${#t} + ${#skipped_str} + ${#age} + 7 ))
+  # Visible: [ s / t <space> icon <skipped> <space> age ] — the two
+  # brackets, the slash and the two spaces are 5, plus the icon's width.
+  __gh_w=$(( ${#s} + ${#t} + ${#skipped_str} + ${#age} + 5 + emoji_w ))
 }
 
 # ─── Repo visibility and branch protection ──────────────────────────
@@ -391,17 +459,8 @@ __gh_segment() {
 __GH_REPO_CACHE_DIR="$__PS1_CACHE_ROOT/gh_repo"
 __GH_REPO_TTL=300      # visibility and protection rules both change rarely
 
-# Named so swapping one is a one-line edit. 🌍 and 🔒 are East Asian Wide
-# by default; 🛡 is Neutral and needs the U+FE0F variation selector to
-# render as an emoji at all, so terminals draw it 2 columns wide while
-# wcwidth() calls it 1. That mismatch is harmless HERE and only here: it
-# sits on the first line of a two-line PS1, and readline measures only the
-# text after the last newline when it places the cursor. Moving any of
-# these below the \n would make the width lie matter — see the __NP_ON
-# comment above for what that class of bug looks like.
-__EMOJI_PUBLIC="🌍"
-__EMOJI_PRIVATE="🔒"
-__EMOJI_PROTECTED="🛡️"
+# The three markers are __I_PUBLIC, __I_PRIVATE and __I_PROTECTED, set
+# with the other icons at the top of this file.
 
 # __repo_meta_refresh <cache_file> <branch>
 # A producer for __cache_get.
@@ -456,6 +515,8 @@ __repo_meta_refresh() {
 __repo_meta_segment() {
   __repo_pre=""
   __repo_post=""
+  __repo_pre_w=0
+  __repo_post_w=0
 
   [[ "$GH_PROMPT" == "1" ]] || return
   local branch="$1" now="$2"
@@ -476,10 +537,13 @@ __repo_meta_segment() {
   # INTERNAL is an org repo visible to that org and nobody else. It is not
   # public, so it reads as the lock rather than inventing a third glyph.
   case "$vis" in
-    PUBLIC)            __repo_pre="${__EMOJI_PUBLIC} " ;;
-    PRIVATE|INTERNAL)  __repo_pre="${__EMOJI_PRIVATE} " ;;
+    PUBLIC)
+      [[ -n "$__I_PUBLIC" ]] && { __repo_pre="$__I_PUBLIC "; __repo_pre_w=$(( __IW_PUBLIC + 1 )); } ;;
+    PRIVATE|INTERNAL)
+      [[ -n "$__I_PRIVATE" ]] && { __repo_pre="$__I_PRIVATE "; __repo_pre_w=$(( __IW_PRIVATE + 1 )); } ;;
   esac
-  [[ "$prot" == "1" ]] && __repo_post=" ${__EMOJI_PROTECTED}"
+  [[ "$prot" == "1" && -n "$__I_PROTECTED" ]] \
+    && { __repo_post=" $__I_PROTECTED"; __repo_post_w=$(( __IW_PROTECTED + 1 )); }
   return 0
 }
 
@@ -737,16 +801,16 @@ __prompt_render() {
   # signal, and the counts cannot be read in the wrong order the way a
   # single 🔄2/3 could be.
   if (( ahead )); then
-    r_sync="🔼${ahead}"
-    (( w_sync = ${#ahead} + 2 ))
+    r_sync="${__I_AHEAD}${ahead}"
+    (( w_sync = ${#ahead} + __IW_AHEAD ))
   fi
   if (( behind )); then
     # ONE space between the arrows, where every other gap on this line is
     # two. Two made them read as two separate segments; they are one fact
     # about one relationship, and the tighter gap is what says so.
     [[ -n "$r_sync" ]] && { r_sync+=" "; (( ++w_sync )); }
-    r_sync+="🔽${behind}"
-    (( w_sync += ${#behind} + 2 ))
+    r_sync+="${__I_BEHIND}${behind}"
+    (( w_sync += ${#behind} + __IW_BEHIND ))
   fi
   # The two-space separator every right-side segment ends with, added once
   # for the pair rather than once per arrow.
@@ -768,6 +832,8 @@ __prompt_render() {
   # honest rendering of both is nothing at all.
   __repo_pre=""
   __repo_post=""
+  __repo_pre_w=0
+  __repo_post_w=0
   if [[ -z "$upstream" ]] && ! __repo_has_remote "$__GIT_TOPLEVEL"; then
     r_gh="${__C_WARN}[no origin]${__C_OFF}"
     (( w_gh = 11 ))
@@ -824,8 +890,8 @@ __prompt_render() {
   # The branch and its two decorations sit on the left as well, and are
   # the only part of it that may go.
   local w_vis=0 w_shield=0 w_branch=0
-  [[ -n "$__repo_pre" ]]  && w_vis=3               # emoji + space
-  [[ -n "$__repo_post" ]] && w_shield=3            # space + emoji
+  [[ -n "$__repo_pre" ]]  && w_vis=$__repo_pre_w      # icon + space
+  [[ -n "$__repo_post" ]] && w_shield=$__repo_post_w  # space + icon
   [[ -n "$head" ]] && (( w_branch = ${#head} + 1 ))
 
   local w=$(( w_staged + w_unstaged + w_untracked + w_sync + w_conflict + w_gh ))
@@ -882,7 +948,11 @@ __prompt_render() {
 # time rather than right now. That is safe against hostile branch names:
 # bash does not re-expand the result of a parameter expansion, so a branch
 # called `$(rm -rf ~)` renders as those literal characters.
-PS1='${__PS1_CONDA}\[\033[38;5;75m\]\u@\h\[\033[0m\] \[\033[38;5;110m\]\w\[\033[0m\]${__PS1_GIT}\n\$ '
+#
+# The colours come in through variables too, inside \[ \]: bash decodes the
+# \[ \] escapes first and expands variables after, so the colour bytes land
+# between the zero-width markers where readline expects them.
+PS1='${__PS1_CONDA}\[${__C_HOST}\]\u@\h\[${__C_OFF}\] \[${__C_PATH}\]\w\[${__C_OFF}\]${__PS1_GIT}\n\$ '
 
 # Prepend, do not assign. Other tools hook PROMPT_COMMAND too -- `zoxide
 # init bash` adds __zoxide_hook, the only thing that teaches `z` where you

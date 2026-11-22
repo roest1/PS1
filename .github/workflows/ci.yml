@@ -61,6 +61,23 @@ jobs:
           [ "$out" = "LEFT=" ] || { echo "outside a repo, the prompt still drew: $out"; exit 1; }
           echo "ok"
 
+      # The PS1_* variables are the public interface: an override must take
+      # effect, a bad value must warn and keep the default, and nothing the
+      # settings block uses may leak into the user's shell.
+      - name: Color and icon settings
+        run: |
+          set -euo pipefail
+          got=$(PS1_COLOR_BRANCH='#ff8800' PS1_COLOR_HOST=08 PS1_ICON_AHEAD='^' PS1_ICON_PUBLIC='' \
+            bash --norc --noprofile -c 'source ./ps1.bash
+              printf "%q|%q|%s%s|[%s]%s|" "$__C_BRANCH" "$__C_HOST" "$__I_AHEAD" "$__IW_AHEAD" "$__I_PUBLIC" "$__IW_PUBLIC"
+              printf "%s" "${PS1@P}" | grep -q $'"'"'\e\[38;5;8m'"'"' && printf host-in-ps1
+              declare -F __ps1_color >/dev/null && printf LEAK; [ -z "${LC_ALL+x}" ] || printf LCLEAK; true')
+          want="\$'\\E[38;2;255;136;0m'|\$'\\E[38;5;8m'|^1|[]0|host-in-ps1"
+          [ "$got" = "$want" ] || { echo "got:  $got"; echo "want: $want"; exit 1; }
+          err=$(PS1_COLOR_PATH=bogus bash --norc --noprofile -c 'source ./ps1.bash; printf "%q" "$__C_PATH"' 2>&1 >/dev/null)
+          grep -q 'PS1_COLOR_PATH' <<<"$err" || { echo "no warning for a bad color: $err"; exit 1; }
+          echo "ok"
+
       # The caches must never be a fixed name in a shared /tmp (see ps1.bash).
       - name: No cache in a shared /tmp
         run: |
