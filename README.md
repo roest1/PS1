@@ -3,9 +3,11 @@
 A bash prompt that knows about git and GitHub, in one file, with no framework or plugin
 manager. It costs one process per prompt.
 
-| Before | After |
-|---|---|
-| ![Fedora's default bash prompt](images/before.png) | ![The same terminal with ps1](images/after.png) |
+![A fresh Fedora terminal: the stock green prompt, then PS1 installed, a repo cloned, and two edits showing on the right](images/demo.png)
+
+Top three lines: Fedora's stock prompt. Then the install, a clone, and two edits. The
+🌍 and 🛡️ (public repo, protected branch) and the `[5/5 ✅ 19m]` CI status appear one
+prompt after `cd`, once GitHub has answered.
 
 ## Install
 
