@@ -16,6 +16,11 @@ jobs:
     name: prompt (${{ matrix.name }})
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
+    env:
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.invalid
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.invalid
     strategy:
       fail-fast: false
       matrix:
@@ -25,7 +30,7 @@ jobs:
           - { name: rhel 10,   container: "almalinux:10" }
     steps:
       - name: Container prerequisites
-        run: dnf install -y git
+        run: dnf install -y git jq
       - uses: actions/checkout@v7
 
       - name: Parses
@@ -43,21 +48,16 @@ jobs:
       - name: Renders a dirty repo, and nothing outside one
         run: |
           set -euo pipefail
+          source .github/ci/lib.bash
           t=$(mktemp -d); cd "$t"
           git init -q -b main r && cd r
-          git config user.name ci; git config user.email ci@example.invalid
           echo a > a; echo b > b; git add a b; git commit -qm init
           echo staged > a; git add a; echo unstaged > b; echo new > c
-          src="$GITHUB_WORKSPACE/ps1.bash"
-          out=$(COLUMNS=200 bash --norc --noprofile -c "source '$src'; __prompt_render; printf '\nLEFT=%s\n' \"\$__PS1_GIT\"" 2>&1)
-          plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*[mG]//g; s/[\x01\x02\r]//g')
-          echo "$plain"
-          for want in main '1 staged' '1 unstaged' '1 untracked'; do
-            grep -qF "$want" <<<"$plain" || { echo "missing: $want"; exit 1; }
-          done
-          if grep -qiE 'command not found|error|syntax' <<<"$plain"; then exit 1; fi
+          out=$(render); echo "$out"
+          for w in 'LEFT= main' '1 staged' '1 unstaged' '1 untracked'; do want "$w"; done
+          if grep -qiE 'command not found|error|syntax' <<<"$out"; then exit 1; fi
           cd /
-          out=$(bash --norc --noprofile -c "source '$src'; __prompt_render; printf 'LEFT=%s' \"\$__PS1_GIT\"")
+          out=$(render | tr -d '\n')
           [ "$out" = "LEFT=" ] || { echo "outside a repo, the prompt still drew: $out"; exit 1; }
           echo "ok"
 
@@ -78,6 +78,134 @@ jobs:
           grep -q 'PS1_COLOR_PATH' <<<"$err" || { echo "no warning for a bad color: $err"; exit 1; }
           echo "ok"
 
+      # A hook after this one must still see the last command's exit status.
+      - name: Leaves $? alone
+        run: |
+          cd "$(mktemp -d)"   # outside any repo, so only the hook prints
+          # 7, not `false`: outside a repo the prompt itself returns 1, and a
+          # test using 1 would pass whether or not the status survived.
+          got=$(bash --norc --noprofile -c 'PROMPT_COMMAND="echo \$?"; source "$GITHUB_WORKSPACE/ps1.bash"; (exit 7); eval "$PROMPT_COMMAND"')
+          [ "$got" = 7 ] || { echo "the next hook saw \$?=$got after exit 7"; exit 1; }
+          echo "ok"
+
+      # Conflicted paths and the operation that left them.
+      - name: Renders a merge and a rebase in progress
+        run: |
+          set -euo pipefail
+          source .github/ci/lib.bash
+          t=$(mktemp -d); cd "$t"
+          git init -q -b main r && cd r
+          echo base > f; git add f; git commit -qm base
+          git checkout -qb topic; echo topic > f; git commit -qam topic
+          git checkout -q main;   echo main  > f; git commit -qam main
+          git merge topic >/dev/null 2>&1 || true
+          out=$(render); echo "$out"
+          want '1 unmerged'; want 'LEFT= main|MERGING'
+          git merge --abort
+          git checkout -q topic
+          git rebase main >/dev/null 2>&1 || true
+          out=$(render); echo "$out"
+          want '1 unmerged'; want 'LEFT= topic|REBASE 1/1'
+          echo "ok"
+
+      # The GitHub segments against a stand-in gh that logs every call, so
+      # what is asked, of which repo, and how often, can all be checked.
+      - name: GitHub segments, against a stub gh
+        run: |
+          set -euo pipefail
+          source .github/ci/lib.bash
+          t=$(mktemp -d); mkdir "$t/bin"
+          cat > "$t/bin/gh" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> "$GHLOG"
+          case "$*" in
+            auth*) exit 1 ;;
+            *"/commits/$NO_RUNS_SHA/"*) echo '{"total_count":0,"check_runs":[]}' ;;
+            *"/commits/"*) echo '{"check_runs":[
+                {"status":"completed","conclusion":"success","completed_at":"2026-01-01T00:00:00Z"},
+                {"status":"completed","conclusion":"timed_out","completed_at":"2026-01-01T00:05:00Z"}]}' ;;
+            *"repos/me/app -q .visibility") echo public ;;
+            *"/rules/branches/"*) echo 1 ;;
+            *"repos/me/app/branches/main -q .protected") echo true ;;
+            *"/branches/"*) echo '{"message":"Branch not found","status":"404"}'; exit 1 ;;
+          esac
+          EOF
+          chmod +x "$t/bin/gh"
+          export PATH="$t/bin:$PATH" XDG_RUNTIME_DIR="$t/run" GHLOG="$t/gh.log" NO_RUNS_SHA=none-yet
+          cd "$t" && git init -q -b main r && cd r
+          git commit -q --allow-empty -m one
+          # A fork: `upstream` is the parent, which bare `gh repo view` picks.
+          git remote add origin git@github.com:me/app.git
+          git remote add upstream https://github.com/parent/app.git
+          git config branch.main.remote origin; git config branch.main.merge refs/heads/main
+          git update-ref refs/remotes/origin/main HEAD
+          git branch -q 'fix#1'
+
+          # Renders twice: the first prompt starts the refreshes, the second
+          # reads what they wrote once no .pending marker is left.
+          prompt() {
+            for _ in 1 2; do
+              out=$(render)
+              for _ in $(seq 50); do
+                [ -n "$(find "$XDG_RUNTIME_DIR" -name '*.pending' 2>/dev/null)" ] || break; sleep 0.1
+              done
+            done
+            echo "$out"
+          }
+
+          out=$(prompt); echo "$out"
+          want '[1/2 ❌'           # timed_out is a failure, not a pass
+          want 'LEFT= 🌍 main 🛡️'
+          if grep -q parent "$GHLOG"; then echo "asked about the fork's parent"; cat "$GHLOG"; exit 1; fi
+
+          git checkout -q 'fix#1'
+          out=$(prompt)
+          grep -qF 'rules/branches/fix%231' "$GHLOG" || { echo "branch not URL-encoded"; cat "$GHLOG"; exit 1; }
+
+          # No check runs is an answer too: it must be cached, not refetched
+          # on every prompt. A fresh runtime dir starts with nothing cached.
+          NO_RUNS_SHA=$(git rev-parse HEAD); export NO_RUNS_SHA
+          export XDG_RUNTIME_DIR="$t/run2"; : > "$GHLOG"
+          out=$(prompt); out=$(prompt)
+          n=$(grep -c "commits/$NO_RUNS_SHA/" "$GHLOG")
+          [ "$n" = 1 ] || { echo "a commit with no runs was fetched $n times"; exit 1; }
+          echo "ok"
+
+      # Sweeps the width across every value where something has to give,
+      # and checks behaviour rather than arithmetic: line one never overlaps
+      # itself, the globe never outlives `N conflicting`, and somewhere the
+      # warning is kept with the globe gone. Producers are stubbed with
+      # ASCII markers so that characters are columns; the fitting is real.
+      - name: Fitting drops segments in order, and never overlaps
+        run: |
+          set -euo pipefail
+          source .github/ci/lib.bash
+          t=$(mktemp -d); cd "$t"
+          git init -q --bare up.git; git clone -q up.git a 2>/dev/null; git clone -q up.git b 2>/dev/null
+          git -C a commit -q --allow-empty -m a; git -C a push -q origin HEAD:main
+          git -C b fetch -q; git -C b checkout -q -B main origin/main
+          git -C a commit -q --allow-empty -m a2; git -C a push -q origin HEAD:main
+          cd b; git commit -q --allow-empty -m b; git fetch -q
+          export PS1_ICON_AHEAD='^' PS1_ICON_BEHIND='v'
+          stubs="__repo_meta_segment() { __repo_pre='G '; __repo_pre_w=2; __repo_post=''; __repo_post_w=0; }
+                 __merge_segment() { __merge_out='1 conflicting  '; __merge_w=15; }
+                 __gh_segment() { __gh_out='[ci]'; __gh_w=4; }"
+          l='\u@\h \w'; l=${l@P}
+          seen=0
+          for c in $(seq $(( ${#l} + 6 )) $(( ${#l} + 60 ))); do
+            out=$(COLUMNS=$c render "$stubs")
+            right=${out%%$'\n'*} left=${out##*LEFT=}
+            if [ -n "$right" ] && (( ${#l} + ${#left} + ${#right} >= c )); then
+              echo "cols=$c: the right side overlaps the left: $out"; exit 1
+            fi
+            if [[ "$left" == ' G '* && "$right" != *conflicting* ]]; then
+              echo "cols=$c: the globe outlived the conflict warning: $out"; exit 1
+            fi
+            if [[ "$right" == *conflicting* && "$left" != ' G '* ]]; then seen=1; fi
+          done
+          (( seen )) || { echo "no width kept the warning with the globe gone"; exit 1; }
+          echo "ok"
+
       # The caches must never be a fixed name in a shared /tmp (see ps1.bash).
       - name: No cache in a shared /tmp
         run: |
@@ -89,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck --severity=warning ps1.bash
+      - run: shellcheck --severity=warning ps1.bash .github/ci/lib.bash
 
   # The one check the main ruleset requires, so adding or renaming a job above
   # never means editing the ruleset. `if: always()` so a failed or skipped
