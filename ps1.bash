@@ -1015,7 +1015,12 @@ __prompt_draw() {
   # The one process this prompt spends. --no-optional-locks keeps it from
   # taking the index lock, so pressing Enter cannot contend with a rebase
   # running in another terminal.
-  st=$(git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null) || return
+  #
+  # `exec`, because without it this was two processes: bash forks a
+  # subshell for the $( ), and the subshell forked again to run git. With
+  # it the subshell becomes git, which saves ~300us per Enter. CI counts
+  # the processes a prompt starts, which is how this was found.
+  st=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null) || return
 
   while IFS= read -r line; do
     case "$line" in
