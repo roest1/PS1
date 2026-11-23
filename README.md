@@ -126,6 +126,26 @@ call per Enter. Inside a repo, one
 The caches live in `$XDG_RUNTIME_DIR/ps1` (or `~/.cache/ps1`), private to you.
 The comments in [`ps1.bash`](ps1.bash) explain each choice.
 
+**What it costs.** `git status` dominates. On a Fedora 44 laptop (Ryzen AI 7 PRO 350):
+
+| Where | Per Enter | Of which `git status` |
+|---|---|---|
+| outside any repo | 0.1 ms | — (not run) |
+| this repo | 4.4 ms | 2.8 ms (62%) |
+| a repo with one submodule | 7.9 ms | 5.9 ms (74%) |
+
+The rest, about 1.5 ms, is bash reading the caches and building the line, and it is the
+same in every repo. `git status` is the part that grows: with tracked files, untracked
+directories, and one more `git` for each submodule. To measure your own, from the
+directory you care about:
+
+```sh
+./time-prompt.sh                 # from a clone; or, installed with curl:
+bash <(curl -fsSL https://raw.githubusercontent.com/roest1/PS1/main/time-prompt.sh)
+```
+
+It times the function bash runs on every Enter, then `git status` alone.
+
 ## License
 
 MIT.
