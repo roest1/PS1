@@ -29,16 +29,11 @@ base=$(realpath "$1") head=$(realpath "$2")
 t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
 
-# A ps1.bash from before it had __git_status calls git inline, where there
-# is nothing to replace, so that call is rewritten in a copy to the same
-# assignment. It changes nothing in a file that has the function. Only the
-# base can be that old: once main has __git_status, this goes.
-sed 's/st=\$(exec git [^)]*)/st=$ST/' "$base" > "$t/base.bash"
-# Either way there has to be something stood in for: without it the real
+# There has to be something to stand in for: in a file without it the real
 # git runs, and the comparison is of its noise.
-for f in "$t/base.bash" "$head"; do
-  grep -qE '^__git_status\(\)|st=\$ST' "$f" \
-    || { echo "perf: no call to git to stand in for in $f" >&2; exit 1; }
+for f in "$base" "$head"; do
+  grep -q '^__git_status()' "$f" \
+    || { echo "perf: no __git_status to stand in for in $f" >&2; exit 1; }
 done
 
 # ─── A repo in a typical state ─────────────────────────────────────
@@ -103,8 +98,8 @@ for scenario in repo outside; do
     # job lands on both versions alike.
     # Assigned first: a round that fails then stops the script, where a
     # failure inside the ( ) of an array append would go unnoticed.
-    v=$(one "$t/base.bash" "$t/run-base" "$t/$scenario"); b+=("$v")
-    v=$(one "$head" "$t/run-head" "$t/$scenario");        h+=("$v")
+    v=$(one "$base" "$t/run-base" "$t/$scenario"); b+=("$v")
+    v=$(one "$head" "$t/run-head" "$t/$scenario"); h+=("$v")
   done
   mb=$(printf '%s\n' "${b[@]}" | median)
   mh=$(printf '%s\n' "${h[@]}" | median)
