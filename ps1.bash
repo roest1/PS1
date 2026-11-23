@@ -482,8 +482,8 @@ __gh_refresh() {
 
 # __gh_segment <sha> <branch> <now_epoch>
 # Sets __gh_out (the rendered segment) and __gh_w (its width in columns).
-# Spends no processes: `command -v` and `read` are builtins and the age is
-# arithmetic. Only the background refresh it may launch costs anything.
+# Spends no processes: `read` is a builtin and the age is arithmetic.
+# Only the background refresh it may launch costs anything.
 # The branch only says which remote to ask; it is not part of the key.
 __gh_segment() {
   __gh_out=""
@@ -492,8 +492,7 @@ __gh_segment() {
   [[ "$GH_PROMPT" == "1" ]] || return
   local sha="$1" branch="$2" now="$3"
   [[ -n "$sha" ]] || return
-  command -v gh &>/dev/null || return
-  command -v jq &>/dev/null || return
+  (( __HAS_GH && __HAS_JQ )) || return
 
   local key="${__GIT_TOPLEVEL:-$PWD}"
   key="${key//\//%}#${sha}"
@@ -639,7 +638,7 @@ __repo_meta_segment() {
 
   [[ "$GH_PROMPT" == "1" ]] || return
   local branch="$1" now="$2"
-  command -v gh &>/dev/null || return
+  (( __HAS_GH )) || return
 
   # Slashes become % so that a path and a branch like feature/foo compose
   # into one file name; __cache_get shortens one that is too long.
@@ -885,6 +884,24 @@ __git_state() {
   return 0
 }
 
+# ─── Is gh installed? ───────────────────────────────────────────────
+#
+# __tools_check
+# Sets __HAS_GH and __HAS_JQ. Looked up on the first prompt, not when this
+# file is sourced: a ~/.bashrc commonly extends PATH AFTER sourcing its
+# prompt, and a gh in ~/.local/bin would be missed. Looked up again only
+# when $PATH changes — `conda activate`, direnv, mise — which costs one
+# string comparison where asking every prompt cost three `command -v`
+# lookups, ~70us. A gh installed into a directory already on PATH shows
+# up in the next shell.
+__tools_check() {
+  [[ -n "${__TOOLS_PATH+set}" && "$__TOOLS_PATH" == "$PATH" ]] && return 0
+  __TOOLS_PATH="$PATH" __HAS_GH=0 __HAS_JQ=0
+  command -v gh &>/dev/null && __HAS_GH=1
+  command -v jq &>/dev/null && __HAS_JQ=1
+  return 0
+}
+
 # ─── Display width ──────────────────────────────────────────────────
 #
 # The fitting pass adds up columns, and bash's ${#s} counts characters.
@@ -1124,6 +1141,7 @@ __prompt_draw() {
   else
     # Read once and handed to every segment, so they agree on what "now" is.
     local now="$EPOCHSECONDS"
+    __tools_check
 
     __repo_meta_segment "$prot_branch" "$now"
     r_vis="$__repo_pre"     w_vis=$__repo_pre_w

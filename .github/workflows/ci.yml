@@ -196,6 +196,24 @@ jobs:
           [ "$n" = 1 ] || { echo "a commit with no runs was fetched $n times"; exit 1; }
           echo "ok"
 
+      # gh is looked for on the first prompt, and again only when PATH
+      # changes: one that arrives with a PATH change mid-session is used.
+      - name: Notices gh when PATH gains it
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d); mkdir "$t/bin"
+          printf '#!/bin/bash\necho "$*" >> "$GHLOG"\n' > "$t/bin/gh"; chmod +x "$t/bin/gh"
+          export XDG_RUNTIME_DIR="$t/run" GHLOG="$t/gh.log"; : > "$GHLOG"
+          cd "$t" && git init -q -b main r && cd r
+          git commit -q --allow-empty -m one; git remote add origin git@github.com:me/app.git
+          bash --norc --noprofile -c "source '$GITHUB_WORKSPACE/ps1.bash'
+            __prompt_render >/dev/null                  # no gh on PATH yet
+            [ -s '$GHLOG' ] && { echo 'gh ran before it was on PATH'; exit 1; }
+            PATH='$t/bin':\$PATH
+            __prompt_render >/dev/null; sleep 2" || exit 1
+          [ -s "$GHLOG" ] || { echo "gh was never used after PATH gained it"; exit 1; }
+          echo "ok"
+
       # A cache key carries the repo's path, and a path deeper than a file
       # name can be must still cache: one refresh, not one per Enter.
       - name: Deep paths still cache
