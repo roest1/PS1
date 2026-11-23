@@ -1242,7 +1242,7 @@ __prompt_draw() {
   # One template, so neither editing PS1 nor overriding it after sourcing
   # can skew the fitting. This used to keep a copy of its own, '\u@\h \w',
   # plus a hand count for the conda prefix; before that it re-derived
-  # \u \h \w by hand, which turned /home/you2 into ~2.
+  # \u \h \w by hand, which turned ${HOME}2 into ~2.
   local ltext="${PS1%%'${__PS1_GIT}'*}"
   ltext="${ltext%%'\n'*}"
   while [[ "$ltext" == *'\['*'\]'* ]]; do
