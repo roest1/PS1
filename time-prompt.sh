@@ -59,7 +59,7 @@ git rev-parse --is-inside-work-tree &>/dev/null && in_repo=1
 if (( in_repo )); then
   # The same command, the same way: inside $( ), as the prompt runs it.
   git_us=$(RUNS=$runs bash --norc --noprofile -c "$time_it" _ \
-             'st=$(git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null)')
+             'st=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null)')
   pct=$(( prompt_us > 0 ? git_us * 100 / prompt_us : 0 ))
   (( pct > 100 )) && pct=100   # separate runs; on a fast repo the noise can cross
   printf 'git status:  %6d µs of that     (%d%%)\n' "$git_us" "$pct"

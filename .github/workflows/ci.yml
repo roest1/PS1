@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # labeled/unlabeled too, so that adding or removing perf-ok re-runs the
+    # speed check below.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -359,11 +362,65 @@ jobs:
             echo "a cache path points into /tmp"; exit 1
           fi
 
+  # Speed has two checks, because a timing alone cannot be trusted on a
+  # shared runner. The process count is exact: it either is one or it is
+  # not. The timing compares this PR with its base branch on the same
+  # machine in the same job, with git's own variance taken out, and fails
+  # on a real slowdown; the perf-ok label says one is intended.
+  perf:
+    runs-on: ubuntu-latest
+    container: fedora:45
+    env:
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.invalid
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.invalid
+    steps:
+      - name: Container prerequisites
+        run: dnf install -y git jq strace
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0    # the base branch too, to compare against
+
+      # Processes, not threads: git's own worker threads are clone() calls
+      # too, and are not what "one process per prompt" is about.
+      - name: One process per prompt in a repo, none outside
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/ps1.bash"
+          procs() {  # processes started by three prompts, in the current directory
+            strace -f -qq -e trace=clone,clone3,fork,vfork -o "$t/strace.log" \
+              bash --norc --noprofile -c "source '$src'; for _ in 1 2 3; do __prompt_render >/dev/null; done"
+            grep -E 'clone3?\(|v?fork\(' "$t/strace.log" | grep -vc CLONE_THREAD || true
+          }
+          t=$(mktemp -d)
+          cd "$t"; n=$(procs)
+          [ "$n" = 0 ] || { echo "outside a repo, 3 prompts started $n processes, want 0"; cat "$t/strace.log"; exit 1; }
+          git init -q -b main r; cd r; echo a > a; git add a; git commit -qm one; echo b > a; echo c > c
+          n=$(procs)
+          [ "$n" = 3 ] || { echo "in a repo, 3 prompts started $n processes, want 3"; cat "$t/strace.log"; exit 1; }
+          echo "ok: 0 outside a repo, 1 per prompt inside one"
+
+      - name: No slower than the base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PERF_OK: ${{ contains(github.event.pull_request.labels.*.name, 'perf-ok') }}
+        run: |
+          set -uo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git show "origin/$BASE_REF:ps1.bash" > /tmp/base.bash
+          .github/ci/perf.bash /tmp/base.bash ps1.bash; rc=$?
+          if [ "$rc" != 0 ] && [ "$PERF_OK" = true ]; then
+            echo "perf-ok is set on this pull request: reported, not enforced."; rc=0
+          fi
+          exit "$rc"
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: shellcheck --severity=warning ps1.bash time-prompt.sh .github/ci/lib.bash
+      - run: shellcheck --severity=warning ps1.bash time-prompt.sh .github/ci/lib.bash .github/ci/perf.bash
 
   # The one check the main ruleset requires, so adding or renaming a job above
   # never means editing the ruleset. `if: always()` so a failed or skipped
@@ -371,7 +428,7 @@ jobs:
   ci-ok:
     name: ci ok
     if: always()
-    needs: [prompt, shellcheck]
+    needs: [prompt, perf, shellcheck]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed
