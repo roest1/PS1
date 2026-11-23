@@ -345,6 +345,12 @@ jobs:
           git init -q r; cd r
           out=$("$GITHUB_WORKSPACE/time-prompt.sh" 3); echo "$out"
           grep -qE '^git status: +[0-9]+ µs' <<<"$out"
+          # --compare: every row present and a number, here where git-prompt.sh exists.
+          out=$("$GITHUB_WORKSPACE/time-prompt.sh" --compare 3); echo "$out"
+          for row in 'stock prompt alone' '+ ps1.bash' "+ git's __git_ps1, branch only" '+ __git_ps1 with dirty'; do
+            grep -qF -- "$row" <<<"$out" || { echo "missing row: $row"; exit 1; }
+          done
+          if grep -qE ' 0 µs$' <<<"$out"; then echo "a comparison measured nothing"; exit 1; fi
 
       # The caches must never be a fixed name in a shared /tmp (see ps1.bash).
       - name: No cache in a shared /tmp
