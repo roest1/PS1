@@ -215,6 +215,35 @@ __relative_age() {
 __CACHE_PENDING_TTL=120  # seconds before an unfinished refresh is presumed dead
 __CACHE_MISS_TTL=60      # seconds before "no answer" is asked again
 
+# Key -> file name, filled in once per key per shell. See __cache_name.
+# -g so that sourcing this file from inside a function still makes it global.
+declare -gA __CACHE_NAMES=()
+
+# __cache_name <key>
+# Records in __CACHE_NAMES the file name the entry for <key> lives under:
+# the key itself, or a hash of it when it is too long to be one.
+#
+# Keys carry the repo's full path, and a file name is at most 255 BYTES.
+# A repo deep enough to overflow that could write neither its entry nor
+# its pending marker, so every Enter there launched another refresh. 200,
+# not 255, because the marker and the temporary file add suffixes. The
+# hash is FNV-1a, in bash so it costs no fork, at ~3ms for a 300-byte key
+# — which is why each key pays it once and is remembered.
+__cache_name() {
+  local LC_ALL=C k="$1" i c h=0xcbf29ce484222325
+  if (( ${#k} <= 200 )); then
+    __CACHE_NAMES[$1]="$1"
+    return
+  fi
+  for (( i = 0; i < ${#k}; i++ )); do
+    printf -v c '%d' "'${k:i:1}"
+    (( h = (h ^ (c & 255)) * 0x100000001b3 ))
+  done
+  # The key's tail stays readable, for whoever is looking in the directory.
+  printf -v c '%016x' "$h"
+  __CACHE_NAMES[$1]="h${c}_${k: -40}"
+}
+
 # __cache_run <cache_file> <ttl> <fn> [args...]
 # The detached half. Forks as freely as it likes — by the time this runs
 # it is already off the prompt path.
@@ -260,7 +289,8 @@ __cache_get() {
   local __cg_dir="$1" __cg_ttl="$2" __cg_key="$3" __cg_now="$4" __cg_fn="$5"
   shift 5
 
-  local __cg_file="${__cg_dir}/${__cg_key}"
+  [[ -n "${__CACHE_NAMES[$__cg_key]-}" ]] || __cache_name "$__cg_key"
+  local __cg_file="${__cg_dir}/${__CACHE_NAMES[$__cg_key]}"
   local __cg_pending="${__cg_file}.pending"
 
   # Split straight out of the file. Reading the line and splitting it
@@ -468,18 +498,16 @@ __gh_segment() {
 
   [[ -n "$s" && -n "$t" ]] || return
 
-  # Both of these reach `(( ))` below, and a cache entry written by an
-  # OLDER version of this file will not have the shape this one expects.
-  # That is not hypothetical: the old /tmp caches held entries from before
-  # run_epoch became an integer, and feeding one of those to the
-  # arithmetic prints
+  # Both of these reach `(( ))` below, and an entry written by an older
+  # version of this file, or a damaged one, need not have the shape this
+  # one expects. A non-number fed to the arithmetic prints
   #
   #   value too great for base (error token is "08")
   #
-  # into the middle of the prompt, once per Enter, forever. The CI check
-  # that configs emit nothing when sourced cannot see this — it happens at
-  # prompt time, not source time — so the guard has to live here. Anything
-  # non-numeric is treated as absent, which costs one refresh.
+  # into the middle of the prompt, once per Enter, until the entry is
+  # rewritten. It happens at prompt time, not source time, so the CI check
+  # that sourcing is silent cannot see it, and the guard has to live here.
+  # Anything non-numeric is treated as absent.
   case "$run_epoch" in
     *[!0-9]*) run_epoch="" ;;
   esac
@@ -560,10 +588,19 @@ __repo_meta_refresh() {
     # answer in one call. It 404s on a branch that exists only here, and
     # for those the rulesets endpoint answers instead: it needs no admin
     # rights, and a ruleset matches a NAME rather than an existing ref.
+    #
+    # Only a 404 falls back. The rulesets endpoint cannot see classic
+    # protection, so falling back on a rate limit or a 5xx used to cache
+    # "unprotected" for a classically protected branch for five minutes.
+    # Any other failure is no answer at all, retried within a minute. The
+    # 404 is read off the body, which gh prints to stdout even on error.
     if out=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}/branches/${enc}" -q '.protected' 2>/dev/null); then
       [[ "$out" == true ]] && prot=1
-    elif out=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}/rules/branches/${enc}" -q 'length' 2>/dev/null); then
+    elif [[ "$out" == *'"status":"404"'* ]] \
+      && out=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}/rules/branches/${enc}" -q 'length' 2>/dev/null); then
       [[ "$out" =~ ^[0-9]+$ ]] && (( out > 0 )) && prot=1
+    else
+      return 0
     fi
   fi
 
@@ -586,9 +623,7 @@ __repo_meta_segment() {
   command -v gh &>/dev/null || return
 
   # Slashes become % so that a path and a branch like feature/foo compose
-  # into one filename. A worktree buried deeper than the 255-byte filename
-  # limit simply fails to cache and shows a bare branch, which is the
-  # right way for this to degrade.
+  # into one file name; __cache_get shortens one that is too long.
   local key="${__GIT_TOPLEVEL:-$PWD}"
   key="${key//\//%}#${branch//\//%}"
 
@@ -789,7 +824,7 @@ __repo_has_remote() {
 # (this worktree's) and not the main repo's.
 __git_state() {
   __git_op="" __git_op_head=""
-  local g="$__GIT_DIR" step="" total=""
+  local g="$__GIT_DIR" line step="" total=""
   [[ -n "$g" ]] || return 0
 
   if [[ -d "$g/rebase-merge" ]]; then
@@ -813,8 +848,18 @@ __git_state() {
   elif [[ -f "$g/MERGE_HEAD" ]];       then __git_op="MERGING"
   elif [[ -f "$g/CHERRY_PICK_HEAD" ]]; then __git_op="CHERRY-PICKING"
   elif [[ -f "$g/REVERT_HEAD" ]];      then __git_op="REVERTING"
-  elif [[ -f "$g/BISECT_LOG" ]];       then __git_op="BISECTING"
+  elif [[ -f "$g/sequencer/todo" ]];   then
+    # A pick or revert of several commits, where you committed one's
+    # conflict resolution yourself: git has removed CHERRY_PICK_HEAD, and
+    # only the next line of the todo says the sequence is still running.
+    { read -r line < "$g/sequencer/todo"; } 2>/dev/null
+    case "$line" in
+      p[[:blank:]]* | pick[[:blank:]]*) __git_op="CHERRY-PICKING" ;;
+      revert[[:blank:]]*)               __git_op="REVERTING" ;;
+    esac
   fi
+  # Last, and outside the chain: a todo naming neither still lets it through.
+  [[ -z "$__git_op" && -f "$g/BISECT_LOG" ]] && __git_op="BISECTING"
 
   __git_op_head="${__git_op_head#refs/heads/}"
   [[ -n "$__git_op" && -n "$step" && -n "$total" ]] && __git_op+=" $step/$total"
@@ -980,10 +1025,7 @@ __prompt_draw() {
   # only to save the calls: a repo with no remote has no GitHub
   # visibility to report and no rules that could apply to it, so the
   # honest rendering of both is nothing at all.
-  __repo_pre=""
-  __repo_post=""
-  __repo_pre_w=0
-  __repo_post_w=0
+  local r_vis="" w_vis=0 r_shield="" w_shield=0
   if [[ -z "$upstream" ]] && ! __repo_has_remote; then
     r_gh="${__C_WARN}[no origin]${__C_OFF}"
     (( w_gh = 11 ))
@@ -992,6 +1034,8 @@ __prompt_draw() {
     local now="$EPOCHSECONDS"
 
     __repo_meta_segment "$prot_branch" "$now"
+    r_vis="$__repo_pre"     w_vis=$__repo_pre_w
+    r_shield="$__repo_post" w_shield=$__repo_post_w
 
     # Only when diverged. Behind-alone fast-forwards and cannot conflict,
     # so this never starts outside the state the two arrows already show.
@@ -1040,8 +1084,6 @@ __prompt_draw() {
   # The branch and its two decorations sit on the left as well, and are
   # the only part of it that may go. An operation in progress is part of
   # the branch — `main|MERGING` — and goes with it, never before it.
-  local r_vis="$__repo_pre" w_vis=$__repo_pre_w
-  local r_shield="$__repo_post" w_shield=$__repo_post_w
   local r_branch="$head" w_branch=0
   [[ -n "$head" ]] && (( w_branch = ${#head} + 1 ))
   [[ -n "$__git_op" ]] && (( w_branch += ${#__git_op} + 1 ))

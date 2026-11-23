@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Container prerequisites
         run: dnf install -y git jq
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Parses
         run: bash -n ps1.bash
@@ -106,6 +106,17 @@ jobs:
           git rebase main >/dev/null 2>&1 || true
           out=$(render); echo "$out"
           want '1 unmerged'; want 'LEFT= topic|REBASE 1/1'
+          git rebase --abort
+          # Picking two commits, the first conflicts, and its resolution is
+          # committed by hand: git drops CHERRY_PICK_HEAD, the sequence goes on.
+          git checkout -q main
+          git checkout -qb side; echo x > g; git add g; git commit -qm side2
+          git checkout -q main
+          git cherry-pick topic side >/dev/null 2>&1 || true
+          echo resolved > f; git add f; git commit -q --no-edit
+          [ ! -e .git/CHERRY_PICK_HEAD ] || { echo "test setup: CHERRY_PICK_HEAD still there"; exit 1; }
+          out=$(render); echo "$out"
+          want 'LEFT= main|CHERRY-PICKING'
           echo "ok"
 
       # The GitHub segments against a stand-in gh that logs every call, so
@@ -127,6 +138,7 @@ jobs:
             *"repos/me/app -q .visibility") echo public ;;
             *"/rules/branches/"*) echo 1 ;;
             *"repos/me/app/branches/main -q .protected") echo true ;;
+            *"/branches/limited -q .protected") echo '{"message":"API rate limit exceeded","status":"403"}'; exit 1 ;;
             *"/branches/"*) echo '{"message":"Branch not found","status":"404"}'; exit 1 ;;
           esac
           EOF
@@ -139,7 +151,7 @@ jobs:
           git remote add upstream https://github.com/parent/app.git
           git config branch.main.remote origin; git config branch.main.merge refs/heads/main
           git update-ref refs/remotes/origin/main HEAD
-          git branch -q 'fix#1'
+          git branch -q 'fix#1'; git branch -q limited
 
           # Renders twice: the first prompt starts the refreshes, the second
           # reads what they wrote once no .pending marker is left.
@@ -162,6 +174,15 @@ jobs:
           out=$(prompt)
           grep -qF 'rules/branches/fix%231' "$GHLOG" || { echo "branch not URL-encoded"; cat "$GHLOG"; exit 1; }
 
+          # Only a 404 means "not pushed yet". A rate limit is no answer, and
+          # must not be answered by the rulesets endpoint, which cannot see
+          # classic protection.
+          git checkout -q limited
+          out=$(prompt)
+          grep -qF 'branches/limited -q .protected' "$GHLOG" || { echo "never asked about the branch"; cat "$GHLOG"; exit 1; }
+          if grep -qF 'rules/branches/limited' "$GHLOG"; then echo "fell back on a rate limit"; cat "$GHLOG"; exit 1; fi
+          git checkout -q main
+
           # No check runs is an answer too: it must be cached, not refetched
           # on every prompt. A fresh runtime dir starts with nothing cached.
           NO_RUNS_SHA=$(git rev-parse HEAD); export NO_RUNS_SHA
@@ -169,6 +190,32 @@ jobs:
           out=$(prompt); out=$(prompt)
           n=$(grep -c "commits/$NO_RUNS_SHA/" "$GHLOG")
           [ "$n" = 1 ] || { echo "a commit with no runs was fetched $n times"; exit 1; }
+          echo "ok"
+
+      # A cache key carries the repo's path, and a path deeper than a file
+      # name can be must still cache: one refresh, not one per Enter.
+      - name: Deep paths still cache
+        run: |
+          set -euo pipefail
+          source .github/ci/lib.bash
+          t=$(mktemp -d); mkdir "$t/bin"
+          printf '#!/bin/bash\necho "$*" >> "$GHLOG"\ncase "$*" in *visibility) echo public ;; esac\n' > "$t/bin/gh"
+          chmod +x "$t/bin/gh"
+          export PATH="$t/bin:$PATH" XDG_RUNTIME_DIR="$t/run" GHLOG="$t/gh.log"
+          d="$t/$(printf 'd%.0s' {1..90})/$(printf 'e%.0s' {1..90})/$(printf 'f%.0s' {1..90})"
+          mkdir -p "$d"; cd "$d"; git init -q -b main .
+          git commit -q --allow-empty -m one
+          git remote add origin git@github.com:me/app.git
+          for _ in 1 2 3 4; do
+            out=$(COLUMNS=1000 render)   # wide enough for a path this long
+            for _ in $(seq 50); do
+              [ -n "$(find "$XDG_RUNTIME_DIR" -name '*.pending' 2>/dev/null)" ] || break; sleep 0.1
+            done
+          done
+          echo "$out"
+          n=$(grep -c 'visibility' "$GHLOG")
+          [ "$n" = 1 ] || { echo "a ${#d}-byte path refreshed $n times in 4 prompts"; exit 1; }
+          want 'LEFT= 🌍 main'
           echo "ok"
 
       # Sweeps the width across every value where something has to give,
@@ -216,7 +263,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: shellcheck --severity=warning ps1.bash .github/ci/lib.bash
 
   # The one check the main ruleset requires, so adding or renaming a job above
