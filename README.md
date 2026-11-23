@@ -124,7 +124,9 @@ for a minute, so a repo with no workflows or a commit not pushed yet does not co
 call per Enter. Inside a repo, one
 `git status --porcelain=v2 --branch` answers everything else; outside one, nothing forks.
 The caches live in `$XDG_RUNTIME_DIR/ps1` (or `~/.cache/ps1`), private to you.
-The comments in [`ps1.bash`](ps1.bash) explain each choice.
+The comments in [`ps1.bash`](ps1.bash) explain each choice. For how bash builds a prompt in the first
+place, and which of your system's files set what, see
+[How your prompt is built](docs/how-your-prompt-is-built.md).
 
 **What it costs.** `git status` dominates. On a Fedora 44 laptop (Ryzen AI 7 PRO 350):
 
