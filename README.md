@@ -35,6 +35,8 @@ $
 | `2 staged  1 unstaged  2 untracked` | working tree |
 | 🔼2&nbsp;🔽3 | commits to push / to pull; both at once means diverged |
 | `2 conflicting` | that pull would conflict, in 2 files |
+| `main\|MERGING`, `topic\|REBASE 2/5` | a merge, rebase, cherry-pick, revert, bisect or `git am` in progress, in git's own words |
+| `1 unmerged` | files that operation left conflicted |
 | `[11/11 ✅ 22h]` | GitHub Actions for this commit, last run 22h ago |
 | `(base)` | active conda env |
 
@@ -63,8 +65,8 @@ PS1_ICON_AHEAD='↑' PS1_ICON_AHEAD_W=1
 | `PS1_COLOR_STAGED` | 150 | `N staged` |
 | `PS1_COLOR_UNSTAGED` | 203 | `N unstaged` |
 | `PS1_COLOR_UNTRACKED` | 180 | `N untracked` |
-| `PS1_COLOR_CONFLICT` | 203, bold | `N conflicting` |
-| `PS1_COLOR_WARN` | 214 | `[no origin]` |
+| `PS1_COLOR_CONFLICT` | 203, bold | `N conflicting`, `N unmerged` |
+| `PS1_COLOR_WARN` | 214 | `[no origin]`, `\|MERGING` and the other operation words |
 | `PS1_COLOR_CI` | 250 | the `[11/11 ✅ 22h]` block |
 
 | Icon | Default | Means |
@@ -100,7 +102,8 @@ from one palette shared with the terminal and editor.
 | Needs | For | Without it |
 |---|---|---|
 | bash 5, `git` | everything | — |
-| `gh`, **logged in** (`gh auth login`), and `jq` | 🌍 / 🔒 / 🛡️ and the `[11/11 ✅ 22h]` block | those parts are simply not drawn |
+| `gh`, **logged in** (`gh auth login`) | 🌍 / 🔒 / 🛡️ | those parts are simply not drawn |
+| the same, plus `jq` | the `[11/11 ✅ 22h]` block | it is simply not drawn |
 | a color emoji font in the terminal | the emoji | boxes instead of emoji |
 
 `gh` answers nothing without a login, even for a public repo, so on a fresh machine the
@@ -116,10 +119,32 @@ repo, press Enter once, and the markers and CI status appear.
 ## How it stays fast
 
 Anything that needs the network or a real merge is read from a cache that a detached job
-refreshes, so pressing Enter never waits on GitHub. Inside a repo, one
+refreshes, so pressing Enter never waits on GitHub. "GitHub had no answer" is cached too,
+for a minute, so a repo with no workflows or a commit not pushed yet does not cost an API
+call per Enter. Inside a repo, one
 `git status --porcelain=v2 --branch` answers everything else; outside one, nothing forks.
 The caches live in `$XDG_RUNTIME_DIR/ps1` (or `~/.cache/ps1`), private to you.
 The comments in [`ps1.bash`](ps1.bash) explain each choice.
+
+**What it costs.** `git status` dominates. On a Fedora 44 laptop (Ryzen AI 7 PRO 350):
+
+| Where | Per Enter | Of which `git status` |
+|---|---|---|
+| outside any repo | 0.1 ms | — (not run) |
+| this repo | 4.4 ms | 2.8 ms (62%) |
+| a repo with one submodule | 7.9 ms | 5.9 ms (74%) |
+
+The rest, about 1.5 ms, is bash reading the caches and building the line, and it is the
+same in every repo. `git status` is the part that grows: with tracked files, untracked
+directories, and one more `git` for each submodule. To measure your own, from the
+directory you care about:
+
+```sh
+./time-prompt.sh                 # from a clone; or, installed with curl:
+bash <(curl -fsSL https://raw.githubusercontent.com/roest1/PS1/main/time-prompt.sh)
+```
+
+It times the function bash runs on every Enter, then `git status` alone.
 
 ## License
 
