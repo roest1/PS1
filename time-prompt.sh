@@ -103,18 +103,21 @@ for f in /usr/share/git-core/contrib/completion/git-prompt.sh \
   [[ -f "$f" ]] && { git_prompt="$f"; break; }
 done
 
+# row <label> <setup>: one line of the table.
+row() { printf '  %-46s %6d µs\n' "$1" "$(whole "$2")"; }
+
 echo
 echo "Whole prompt per Enter, on top of this system's stock setup:"
-printf '  %-46s %6d µs\n' "stock prompt alone" "$(whole ':')"
-printf '  %-46s %6d µs\n' "+ ps1.bash" "$(whole "source '$src'")"
+row "stock prompt alone" ':'
+row "+ ps1.bash" "source '$src'"
 if [[ -n "$git_prompt" ]]; then
   gp="source '$git_prompt'; PROMPT_COMMAND+=('__git_ps1 \"\\u@\\h \\w\" \"\\\\\$ \"')"
   if (( in_repo )); then
-    printf '  %-46s %6d µs\n' "+ git's __git_ps1, branch only" "$(whole "$gp")"
-    printf '  %-46s %6d µs\n' "+ __git_ps1 with dirty, untracked, upstream" \
-      "$(whole "GIT_PS1_SHOWDIRTYSTATE=1 GIT_PS1_SHOWUNTRACKEDFILES=1 GIT_PS1_SHOWUPSTREAM=auto; $gp")"
+    row "+ git's __git_ps1, branch only" "$gp"
+    row "+ __git_ps1 with dirty, untracked, upstream" \
+      "GIT_PS1_SHOWDIRTYSTATE=1 GIT_PS1_SHOWUNTRACKEDFILES=1 GIT_PS1_SHOWUPSTREAM=auto; $gp"
   else
-    printf '  %-46s %6d µs\n' "+ git's __git_ps1" "$(whole "$gp")"
+    row "+ git's __git_ps1" "$gp"
   fi
   echo "  (__git_ps1 from $git_prompt)"
 else

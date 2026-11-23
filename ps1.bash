@@ -101,7 +101,7 @@ __ps1_color() {  # <out var> <NAME> <default 0-255> [bold]
 # column -- set its _W.
 __ps1_icon() {  # <out var> <width out var> <NAME> <default>
   local n="PS1_ICON_$3" wn="PS1_ICON_$3_W" v w chars
-  if [[ -n "${!n+set}" ]]; then v="${!n}"; else v="$4"; fi
+  v="${!n-$4}"   # - and not :-, so that set-but-empty hides the marker
   w="${!wn:-}"
   printf -v "$1" '%s' "$v"
   if [[ ! "$w" =~ ^[0-9]+$ ]]; then
@@ -109,10 +109,7 @@ __ps1_icon() {  # <out var> <width out var> <NAME> <default>
     # the local LC_ALL makes ${#v} count bytes and is undone on return.
     chars=${#v}
     local LC_ALL=C
-    if (( chars == 0 )); then w=0
-    elif (( chars == ${#v} )); then w=$chars
-    else w=2
-    fi
+    if (( chars == ${#v} )); then w=$chars; else w=2; fi
   fi
   printf -v "$2" '%s' "$w"
 }
@@ -276,16 +273,40 @@ __cache_run() {
 # atomic, so it finds the old line or the new one.
 __cache_write() {
   local tmp="$1.$BASHPID.tmp"
-  printf '%s%s\n' "${2:+$2|}" "$(( EPOCHSECONDS + $3 ))" > "$tmp" && mv -f "$tmp" "$1"
-  rm -f "$tmp"
+  printf '%s%s\n' "${2:+$2|}" "$(( EPOCHSECONDS + $3 ))" > "$tmp" && mv -f "$tmp" "$1" \
+    || rm -f "$tmp"
+}
+
+# __cache_read <file>
+# Sets __CACHE_FIELDS to the entry's fields, empty when there is no entry
+# or it recorded no answer, and __CACHE_EXPIRES to the epoch it expires at
+# (0 when there is none). The one reader of the format __cache_write
+# writes. Spends no processes: `read` is a builtin.
+__cache_read() {
+  # Split straight out of the file. Reading the line and splitting it
+  # afterwards would want a <<< here-string, and bash implements those
+  # with a pipe or a temporary file — real I/O, on the prompt path, per
+  # segment.
+  __CACHE_FIELDS=() __CACHE_EXPIRES=0
+  [[ -f "$1" ]] && IFS='|' read -r -a __CACHE_FIELDS < "$1"
+
+  # The expiry is the layer's own field; what is left is the producer's.
+  # (Guarded: [-1] of an empty array is an error message, not an empty string.)
+  (( ${#__CACHE_FIELDS[@]} )) || return 0
+  __CACHE_EXPIRES="${__CACHE_FIELDS[-1]}"
+  unset '__CACHE_FIELDS[-1]'
+  case "$__CACHE_EXPIRES" in
+    '' | *[!0-9]*) __CACHE_EXPIRES=0 ;;
+  esac
+  return 0
 }
 
 # __cache_get <dir> <ttl> <key> <now> <fn> [args...]
 # Sets __CACHE_FIELDS to the producer's fields for this key, empty when
 # there is none yet or it had no answer, and __CACHE_EXPIRES to the epoch
 # the entry expires at (0 when there is none). Launches <fn> detached when
-# the entry has expired. Spends no processes: `read` is a builtin and the
-# expiry is arithmetic.
+# the entry has expired. Spends no processes: the read is a builtin and
+# the expiry is arithmetic.
 #
 # The locals carry a __cg_ prefix for the reason __relative_age documents
 # above: bash locals are dynamically scoped, so a plainly-named local here
@@ -300,25 +321,8 @@ __cache_get() {
   local __cg_file="${__cg_dir}/${__CACHE_NAMES[$__cg_key]}"
   local __cg_pending="${__cg_file}.pending"
 
-  # Split straight out of the file. Reading the line and splitting it
-  # afterwards would want a <<< here-string, and bash implements those
-  # with a temporary file — real I/O, on the prompt path, per segment.
-  __CACHE_FIELDS=()
-  [[ -f "$__cg_file" ]] && IFS='|' read -r -a __CACHE_FIELDS < "$__cg_file"
-
-  # The expiry is the layer's own field; what is left is the producer's.
-  # (Guarded: [-1] of an empty array is an error message, not an empty string.)
-  local __cg_expires=0
-  if (( ${#__CACHE_FIELDS[@]} )); then
-    __cg_expires="${__CACHE_FIELDS[-1]}"
-    unset '__CACHE_FIELDS[-1]'
-  fi
-  case "$__cg_expires" in
-    '' | *[!0-9]*) __cg_expires=0 ;;
-  esac
-  __CACHE_EXPIRES=$__cg_expires
-
-  (( __cg_now > __cg_expires )) || return 0
+  __cache_read "$__cg_file"
+  (( __cg_now > __CACHE_EXPIRES )) || return 0
 
   # A pending marker whose job died — terminal closed, WSL shut down,
   # SIGKILL — used to freeze its entry permanently, because the marker was
@@ -508,7 +512,7 @@ __gh_segment() {
 
   # Everything but the age is remembered: the age is relative to now, and
   # remembering it would freeze "4m" for up to a minute.
-  local memo="${__GIT_TOPLEVEL:-$PWD}"$'\001'"$sha"
+  local memo="$__GIT_TOPLEVEL"$'\001'"$sha"
   if [[ "$memo" != "${__GS_MEMO-}" ]] || (( now > __GS_EXPIRES )); then
     __gh_read "$sha" "$branch" "$now"
     __GS_MEMO="$memo" __GS_EXPIRES=$__CACHE_EXPIRES
@@ -532,8 +536,7 @@ __gh_read() {
   local sha="$1" branch="$2" now="$3"
   __GS_HEAD="" __GS_HEAD_W=0 __GS_RUN=""
 
-  local key="${__GIT_TOPLEVEL:-$PWD}"
-  key="${key//\//%}#${sha}"
+  local key="${__GIT_TOPLEVEL//\//%}#${sha}"
   __cache_get "$__GH_CACHE_DIR" "$__GH_TTL" "$key" "$now" __gh_refresh "$sha" "$branch"
 
   local s="${__CACHE_FIELDS[0]}" t="${__CACHE_FIELDS[1]}" sym="${__CACHE_FIELDS[2]}"
@@ -621,18 +624,18 @@ __repo_meta_refresh() {
   # worktree and clone of it shares one call per __GH_REPO_TTL, where each
   # branch used to ask again. Read and written here, in the background,
   # so the prompt still reads one entry per segment.
-  local vfile="$__GH_REPO_CACHE_DIR/visibility#${__gh_host}%${__gh_repo//\//%}" vexp=""
-  { IFS='|' read -r vis vexp < "$vfile"; } 2>/dev/null
-  if [[ ! "$vexp" =~ ^[0-9]+$ ]] || (( EPOCHSECONDS > vexp )); then
+  local vfile="$__GH_REPO_CACHE_DIR/visibility#${__gh_host}%${__gh_repo//\//%}" fetched=0
+  __cache_read "$vfile"
+  vis="${__CACHE_FIELDS[0]-}"
+  if (( EPOCHSECONDS > __CACHE_EXPIRES )); then
     vis=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}" -q .visibility 2>/dev/null) || return 0
-    case "$vis" in
-      public | private | internal) __cache_write "$vfile" "$vis" "$__GH_REPO_TTL" ;;
-    esac
+    fetched=1
   fi
   case "$vis" in
     public | private | internal) ;;
     *) return 0 ;;
   esac
+  (( fetched )) && __cache_write "$vfile" "$vis" "$__GH_REPO_TTL"
 
   if [[ -n "$branch" ]]; then
     enc=$(__uri_encode "$branch")
@@ -667,27 +670,23 @@ __repo_meta_refresh() {
 # call, where there is no branch name for a rule to attach to.
 # Spends no processes; only the background refresh it may launch does.
 __repo_meta_segment() {
-  __repo_pre=""
-  __repo_post=""
-  __repo_pre_w=0
-  __repo_post_w=0
-
-  [[ "$GH_PROMPT" == "1" ]] || return
   local branch="$1" now="$2"
-  (( __HAS_GH )) || return
-
-  # Nothing here depends on the clock, so the whole result is remembered.
-  local memo="${__GIT_TOPLEVEL:-$PWD}"$'\001'"$branch"
-  if [[ "$memo" == "${__RM_MEMO-}" ]] && (( now <= __RM_EXPIRES )); then
-    __repo_pre="$__RM_PRE"   __repo_pre_w=$__RM_PRE_W
-    __repo_post="$__RM_POST" __repo_post_w=$__RM_POST_W
+  # Forgetting as well as clearing: switched back on, it reads afresh.
+  if [[ "$GH_PROMPT" != "1" ]] || (( ! __HAS_GH )); then
+    __repo_pre="" __repo_post="" __repo_pre_w=0 __repo_post_w=0 __RM_MEMO=""
     return 0
   fi
 
+  # Nothing here depends on the clock, so the whole result is remembered,
+  # and the four outputs are themselves the memory: nothing else writes
+  # them, so a hit leaves them exactly as the last call set them.
+  local memo="$__GIT_TOPLEVEL"$'\001'"$branch"
+  [[ "$memo" == "${__RM_MEMO-}" ]] && (( now <= __RM_EXPIRES )) && return 0
+  __repo_pre="" __repo_post="" __repo_pre_w=0 __repo_post_w=0
+
   # Slashes become % so that a path and a branch like feature/foo compose
   # into one file name; __cache_get shortens one that is too long.
-  local key="${__GIT_TOPLEVEL:-$PWD}"
-  key="${key//\//%}#${branch//\//%}"
+  local key="${__GIT_TOPLEVEL//\//%}#${branch//\//%}"
 
   __cache_get "$__GH_REPO_CACHE_DIR" "$__GH_REPO_TTL" "$key" "$now" \
     __repo_meta_refresh "$branch"
@@ -706,8 +705,6 @@ __repo_meta_segment() {
     && { __repo_post=" $__I_PROTECTED"; __repo_post_w=$(( __IW_PROTECTED + 1 )); }
 
   __RM_MEMO="$memo" __RM_EXPIRES=$__CACHE_EXPIRES
-  __RM_PRE="$__repo_pre"   __RM_PRE_W=$__repo_pre_w
-  __RM_POST="$__repo_post" __RM_POST_W=$__repo_post_w
   return 0
 }
 
@@ -748,7 +745,7 @@ __GIT_MERGE_TTL=300
 # A producer for __cache_get: prints the conflicted file count, or nothing.
 __merge_refresh() {
   local upstream="$1"
-  local out rc files=0 line first=1
+  local out rc files=0 line
 
   out=$(git --no-optional-locks merge-tree --write-tree --name-only \
           HEAD "$upstream" 2>/dev/null)
@@ -757,11 +754,10 @@ __merge_refresh() {
   if (( rc == 1 )) && [[ -n "$out" ]]; then
     # Line 1 is the merged tree's oid. The conflicted paths follow it, and
     # a blank line ends them before git's human-readable explanation.
-    while IFS= read -r line; do
-      if (( first )); then first=0; continue; fi
-      [[ -z "$line" ]] && break
-      (( ++files ))
-    done <<< "$out"
+    {
+      read -r line
+      while IFS= read -r line && [[ -n "$line" ]]; do (( ++files )); done
+    } <<< "$out"
   elif (( rc != 0 )); then
     # Unknown, not clean. Print nothing rather than a reassuring zero —
     # silence here already means "merges fine", and this is the one
@@ -776,10 +772,15 @@ __merge_refresh() {
 # Sets __merge_out and __merge_w. Spends no processes; only the background
 # refresh it may launch does.
 __merge_segment() {
-  __merge_out=""
-  __merge_w=0
-
   local upstream="$1" oid="$2" ahead="$3" behind="$4" now="$5"
+
+  # Remembered until the entry expires, the way the GitHub segments are,
+  # and in the two outputs themselves: this is their only writer, so a hit
+  # leaves them as they are. While diverged that was a file read, a split
+  # and a rebuilt string on every Enter.
+  local memo="${__GIT_TOPLEVEL}#${oid}#${ahead}#${behind}"
+  [[ "$memo" == "${__MG_MEMO-}" ]] && (( now <= __MG_EXPIRES )) && return 0
+  __merge_out="" __merge_w=0 __MG_MEMO="$memo" __MG_EXPIRES=0
   [[ -n "$upstream" && -n "$oid" ]] || return
 
   # Keyed on both sides of the merge. The oid moves when you commit; the
@@ -789,11 +790,9 @@ __merge_segment() {
   # and so keeps a stale answer until the TTL expires — the one case this
   # key cannot see, and the reason there is a TTL at all rather than
   # caching forever on an exact key.
-  local key="${__GIT_TOPLEVEL:-$PWD}"
-  key="${key//\//%}#${oid}#${ahead}#${behind}"
-
-  __cache_get "$__GIT_MERGE_CACHE_DIR" "$__GIT_MERGE_TTL" "$key" "$now" \
+  __cache_get "$__GIT_MERGE_CACHE_DIR" "$__GIT_MERGE_TTL" "${memo//\//%}" "$now" \
     __merge_refresh "$upstream"
+  __MG_EXPIRES=$__CACHE_EXPIRES
 
   local files="${__CACHE_FIELDS[0]}"
 
@@ -801,8 +800,9 @@ __merge_segment() {
     '' | *[!0-9]* | 0) return ;;
   esac
 
-  __merge_out="${__C_CONFLICT}${files} conflicting${__C_OFF}  "
-  (( __merge_w = ${#files} + 14 ))               # " conflicting" + 2 spaces
+  local text="${files} conflicting"
+  __merge_out="${__C_CONFLICT}${text}${__C_OFF}  "
+  (( __merge_w = ${#text} + 2 ))                 # the two spaces after it
   return 0
 }
 
@@ -831,8 +831,9 @@ __merge_segment() {
 __in_git_tree() {
   __GIT_TOPLEVEL="" __GIT_DIR=""
   # Let git answer whenever the environment overrides where the repo is.
+  # $PWD stands in for the worktree there: it only has to key the caches.
   if [[ -n "$GIT_DIR" || -n "$GIT_WORK_TREE" ]]; then
-    __GIT_DIR="$GIT_DIR"
+    __GIT_TOPLEVEL="$PWD" __GIT_DIR="$GIT_DIR"
     return 0
   fi
   local d="$PWD" line
@@ -1033,19 +1034,14 @@ __display_width() {
 # so every hook after it reads $? — and used to read this function's
 # status rather than your last command's, which is a lie to any hook that
 # shows or acts on exit codes. It hands the real one back on the way out.
+#
+# Everything a directory with no repo needs is done here, and __prompt_draw
+# is entered only inside one. bash copies a function's whole body each time
+# it is called and sets up every local before the first test, so a call
+# that returned on its third line was 80us of the 150 a prompt outside a
+# repo took.
 __prompt_render() {
   local __pr_status=$?
-  __prompt_draw
-  return "$__pr_status"
-}
-
-__prompt_draw() {
-  local st line xy ab
-  local head="" oid="" staged=0 unstaged=0 untracked=0 unmerged=0 ahead=0 behind=0
-  # The upstream's NAME, not a flag. porcelain v2 hands it over for free
-  # and the merge check below needs something to merge against; emptiness
-  # still answers the "is there an upstream at all" question a flag did.
-  local upstream=""
 
   __PS1_CONDA=""
   if [[ -n "$CONDA_DEFAULT_ENV" ]]; then
@@ -1053,24 +1049,65 @@ __prompt_draw() {
   fi
 
   # Cleared before the git call, not after it: leaving a repo has to drop
-  # the branch, and the early return below is the path that does it.
+  # the branch, and skipping the draw is the path that does it.
   __PS1_GIT=""
 
   # Skip the fork entirely in directories with no repo above them — see
   # __in_git_tree for why it is safe to trust a "no" here.
-  __in_git_tree || return
+  __in_git_tree && __prompt_draw
+  return "$__pr_status"
+}
 
-  # The one process this prompt spends. --no-optional-locks keeps it from
-  # taking the index lock, so pressing Enter cannot contend with a rebase
-  # running in another terminal.
-  #
-  # `exec`, because without it this was two processes: bash forks a
-  # subshell for the $( ), and the subshell forked again to run git. With
-  # it the subshell becomes git, which saves ~300us per Enter. CI counts
-  # the processes a prompt starts, which is how this was found.
-  st=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null) || return
+# __split_lines <text>
+# Sets __LINES to the lines of <text>. One expansion, where the obvious
+# `while read ...; done <<< "$text"` is a system call per BYTE: bash feeds
+# a here-string through a pipe, and `read` cannot take more than one byte
+# at a time from a pipe without swallowing what belongs to the next reader.
+# That made the prompt slower the dirtier the tree — 600us at 30 changed
+# files. Its own function so that IFS and noglob (`local -`) are both put
+# back on return; noglob, or a path with a * in it would expand.
+__split_lines() {
+  local IFS=$'\n' -
+  set -f
+  # shellcheck disable=SC2206  # splitting is the point
+  __LINES=($1)
+}
 
-  while IFS= read -r line; do
+# __git_status
+# Sets __GIT_STATUS to what git says about this worktree, and fails when
+# git does.
+#
+# The one process this prompt spends. --no-optional-locks keeps it from
+# taking the index lock, so pressing Enter cannot contend with a rebase
+# running in another terminal.
+#
+# `exec`, because without it this was two processes: bash forks a
+# subshell for the $( ), and the subshell forked again to run git. With
+# it the subshell becomes git, which saves ~300us per Enter. CI counts
+# the processes a prompt starts, which is how this was found.
+#
+# A function of its own, with one caller, so that there is somewhere to
+# stand in for git: the speed check in .github/ci/perf.bash replaces this
+# with a recorded status, and used to edit the `exec` out of a copy of this
+# file with sed to get the same effect. The $( ) is in here rather than
+# around the call for that check's sake too — replaced, nothing forks at
+# all — and because an exec outside one would replace your shell.
+__git_status() {
+  __GIT_STATUS=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null)
+}
+
+__prompt_draw() {
+  local line xy ab text
+  local head="" oid="" staged=0 unstaged=0 untracked=0 unmerged=0 ahead=0 behind=0
+  # The upstream's NAME, not a flag. porcelain v2 hands it over for free
+  # and the merge check below needs something to merge against; emptiness
+  # still answers the "is there an upstream at all" question a flag did.
+  local upstream=""
+
+  __git_status || return
+
+  __split_lines "$__GIT_STATUS"
+  for line in "${__LINES[@]}"; do
     case "$line" in
       '# branch.oid '*)  oid="${line#'# branch.oid '}" ;;
       '# branch.head '*) head="${line#'# branch.head '}" ;;
@@ -1091,7 +1128,7 @@ __prompt_draw() {
       # entirely, so a merge with conflicts in it drew nothing at all.
       'u '*)             (( ++unmerged )) ;;
     esac
-  done <<< "$st"
+  done
 
   # An unborn branch reports "(initial)" — a placeholder, not a sha, and
   # nothing to ask GitHub about.
@@ -1116,27 +1153,31 @@ __prompt_draw() {
   # Right side, one variable per segment, each with its visible width.
   # Built separately rather than concatenated as it goes, because the
   # fitting pass below removes individual pieces — appending would mean
-  # rebuilding the whole string to drop one. Every emoji here is East
-  # Asian Wide: one character, two columns.
+  # rebuilding the whole string to drop one. A count's width is measured
+  # off its own text, plus the two spaces every segment ends with; an
+  # icon's comes from its __IW_.
   local r_unmerged="" r_staged="" r_unstaged="" r_untracked="" r_sync="" r_conflict="" r_gh=""
   local w_unmerged=0 w_staged=0 w_unstaged=0 w_untracked=0 w_sync=0 w_conflict=0 w_gh=0
 
   # First on the line and in the conflict colour: these are the files
   # standing between you and finishing the merge or rebase in progress.
   if (( unmerged )); then
-    r_unmerged="${__C_CONFLICT}${unmerged} unmerged${__C_OFF}  "
-    (( w_unmerged = ${#unmerged} + 11 ))           # " unmerged" + 2 spaces
+    text="${unmerged} unmerged"
+    r_unmerged="${__C_CONFLICT}${text}${__C_OFF}  "
+    (( w_unmerged = ${#text} + 2 ))
   fi
   if (( staged )); then
-    r_staged="${__C_STAGED}${staged} staged${__C_OFF}  "
-    (( w_staged = ${#staged} + 9 ))                # " staged" + 2 spaces
+    text="${staged} staged"
+    r_staged="${__C_STAGED}${text}${__C_OFF}  "
+    (( w_staged = ${#text} + 2 ))
   fi
   # "unstaged", not "modified": porcelain v2's Y column is literally the
   # unstaged state, and the pair reads as one idea next to "N staged"
   # where "modified" invited the question of modified-versus-what.
   if (( unstaged )); then
-    r_unstaged="${__C_UNSTAGED}${unstaged} unstaged${__C_OFF}  "
-    (( w_unstaged = ${#unstaged} + 11 ))           # " unstaged" + 2 spaces
+    text="${unstaged} unstaged"
+    r_unstaged="${__C_UNSTAGED}${text}${__C_OFF}  "
+    (( w_unstaged = ${#text} + 2 ))
   fi
   # Counts porcelain ENTRIES, not files. Git's default -unormal collapses
   # an untracked directory into one `?` line, so a new build/ holding 500
@@ -1147,8 +1188,9 @@ __prompt_draw() {
   # mode that actually costs time on a large tree, spent to buy a number
   # whose only distinct behaviour is being alarming.
   if (( untracked )); then
-    r_untracked="${__C_UNTRACKED}${untracked} untracked${__C_OFF}  "
-    (( w_untracked = ${#untracked} + 12 ))         # " untracked" + 2 spaces
+    text="${untracked} untracked"
+    r_untracked="${__C_UNTRACKED}${text}${__C_OFF}  "
+    (( w_untracked = ${#text} + 2 ))
   fi
   # One segment, not two, because they are one idea and the fitting pass
   # drops them together: 🔼 alone after 🔽 was dropped would read as "you
@@ -1189,8 +1231,9 @@ __prompt_draw() {
   # honest rendering of both is nothing at all.
   local r_vis="" w_vis=0 r_shield="" w_shield=0
   if [[ -z "$upstream" ]] && ! __repo_has_remote; then
-    r_gh="${__C_WARN}[no origin]${__C_OFF}"
-    (( w_gh = 11 ))
+    text="[no origin]"
+    r_gh="${__C_WARN}${text}${__C_OFF}"
+    (( w_gh = ${#text} ))
   else
     # Read once and handed to every segment, so they agree on what "now" is.
     local now="$EPOCHSECONDS"
@@ -1243,12 +1286,19 @@ __prompt_draw() {
   # can skew the fitting. This used to keep a copy of its own, '\u@\h \w',
   # plus a hand count for the conda prefix; before that it re-derived
   # \u \h \w by hand, which turned ${HOME}2 into ~2.
-  local ltext="${PS1%%'${__PS1_GIT}'*}"
-  ltext="${ltext%%'\n'*}"
-  while [[ "$ltext" == *'\['*'\]'* ]]; do
-    ltext="${ltext%%'\['*}${ltext#*'\]'}"
-  done
-  ltext="${ltext@P}"
+  #
+  # The template half depends on nothing but PS1's own text, so it is
+  # remembered until PS1 changes; only the expansion runs every time.
+  local ltext
+  if [[ "$PS1" != "${__LT_FOR-}" ]]; then
+    ltext="${PS1%%'${__PS1_GIT}'*}"
+    ltext="${ltext%%'\n'*}"
+    while [[ "$ltext" == *'\['*'\]'* ]]; do
+      ltext="${ltext%%'\['*}${ltext#*'\]'}"
+    done
+    __LT_FOR="$PS1" __LT="$ltext"
+  fi
+  ltext="${__LT@P}"
   while [[ "$ltext" == *$'\001'*$'\002'* ]]; do
     ltext="${ltext%%$'\001'*}${ltext#*$'\002'}"
   done

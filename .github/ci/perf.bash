@@ -7,12 +7,13 @@
 # Absolute timings are useless in CI: a shared runner's speed varies by tens
 # of percent between jobs, and git's own run time swings by a third between
 # calls. So both versions are measured here, alternately, in rounds, and
-# only their medians are compared; and `git` is replaced, in the measuring
-# shell only, by a function that prints a status recorded from a real repo.
-# What is left to time is the prompt's own work — exactly what a change to
-# ps1.bash can make slower. `exec` would bypass that function and run the
-# real git, so both versions are timed from copies with it removed: how
-# many processes the prompt starts is the other check's job, in ci.yml.
+# only their medians are compared; and the prompt's one call to git,
+# __git_status, is replaced, in the measuring shell only, by the assignment
+# of a status recorded from a real repo. Nothing forks, so what is left to
+# time is the prompt's own work — exactly what a change to ps1.bash can
+# make slower — and no fork's worth of noise for a small slowdown to hide
+# in. How many processes the prompt starts is the other check's job, in
+# ci.yml.
 #
 # Settings, as environment variables:
 #   ROUNDS   alternating rounds per scenario       (default 9)
@@ -22,10 +23,23 @@
 set -euo pipefail
 
 rounds="${ROUNDS:-9}" runs="${RUNS:-300}" max_pct="${MAX_PCT:-5}" max_us="${MAX_US:-40}"
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.bash"
+# Absolute, because each is sourced from inside another directory.
+base=$(realpath "$1") head=$(realpath "$2")
 t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
-sed 's/\$(exec git /$(git /' "$1" > "$t/base.bash"; base="$t/base.bash"
-sed 's/\$(exec git /$(git /' "$2" > "$t/head.bash"; head="$t/head.bash"
+
+# A ps1.bash from before it had __git_status calls git inline, where there
+# is nothing to replace, so that call is rewritten in a copy to the same
+# assignment. It changes nothing in a file that has the function. Only the
+# base can be that old: once main has __git_status, this goes.
+sed 's/st=\$(exec git [^)]*)/st=$ST/' "$base" > "$t/base.bash"
+# Either way there has to be something stood in for: without it the real
+# git runs, and the comparison is of its noise.
+for f in "$t/base.bash" "$head"; do
+  grep -qE '^__git_status\(\)|st=\$ST' "$f" \
+    || { echo "perf: no call to git to stand in for in $f" >&2; exit 1; }
+done
 
 # ─── A repo in a typical state ─────────────────────────────────────
 # A branch with an upstream, one file each staged, unstaged and untracked,
@@ -57,19 +71,18 @@ mkdir "$t/outside"
 # with lifetimes long enough that nothing expires while it is being timed.
 warm() {
   ( cd "$t/repo"; XDG_RUNTIME_DIR="$2" COLUMNS=200 bash --norc --noprofile -c '
-      source "$1"; __GH_TTL=86400 __GH_REPO_TTL=86400 __CACHE_MISS_TTL=86400
-      for _ in 1 2 3; do
-        __prompt_render >/dev/null
-        for _ in $(seq 100); do [ -n "$(find "$XDG_RUNTIME_DIR" -name "*.pending" 2>/dev/null)" ] || break; sleep 0.05; done
-      done' _ "$1" )
+      source "$1" || exit 1; source "$2"; __GH_TTL=86400 __GH_REPO_TTL=86400 __CACHE_MISS_TTL=86400
+      for _ in 1 2 3; do __prompt_render >/dev/null; settle; done' _ "$1" "$lib" )
 }
+
+# What stands in for git's answer: the repo's status, recorded once.
+status=$(git -C "$t/repo" --no-optional-locks status --porcelain=v2 --branch)
 
 # one <ps1.bash> <runtime dir> <dir>: µs per prompt, one round.
 one() {
-  ( cd "$3"; ST="$(git -C "$t/repo" --no-optional-locks status --porcelain=v2 --branch)" \
-      XDG_RUNTIME_DIR="$2" COLUMNS=200 RUNS="$runs" bash --norc --noprofile -c '
-      source "$1"
-      git() { printf "%s\n" "$ST"; }
+  ( cd "$3"; ST="$status" XDG_RUNTIME_DIR="$2" COLUMNS=200 RUNS="$runs" bash --norc --noprofile -c '
+      source "$1" || exit 1
+      __git_status() { __GIT_STATUS=$ST; }
       for (( i = 0; i < 20; i++ )); do __prompt_render >/dev/null; done
       s=$EPOCHREALTIME
       for (( i = 0; i < RUNS; i++ )); do __prompt_render >/dev/null; done
@@ -88,8 +101,10 @@ for scenario in repo outside; do
   for (( r = 0; r < rounds; r++ )); do
     # Alternating, so that a machine slowing down or speeding up during the
     # job lands on both versions alike.
-    b+=("$(one "$base" "$t/run-base" "$t/$scenario")")
-    h+=("$(one "$head" "$t/run-head" "$t/$scenario")")
+    # Assigned first: a round that fails then stops the script, where a
+    # failure inside the ( ) of an array append would go unnoticed.
+    v=$(one "$t/base.bash" "$t/run-base" "$t/$scenario"); b+=("$v")
+    v=$(one "$head" "$t/run-head" "$t/$scenario");        h+=("$v")
   done
   mb=$(printf '%s\n' "${b[@]}" | median)
   mh=$(printf '%s\n' "${h[@]}" | median)
