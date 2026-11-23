@@ -57,9 +57,13 @@ printf 'prompt:      %6d µs per Enter   (%d runs in %s)\n' "$prompt_us" "$runs"
 in_repo=0
 git rev-parse --is-inside-work-tree &>/dev/null && in_repo=1
 if (( in_repo )); then
-  # The same command, the same way: inside $( ), as the prompt runs it.
-  git_us=$(RUNS=$runs bash --norc --noprofile -c "$time_it" _ \
-             'st=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null)')
+  # The prompt's own call, so whatever it asks git, this asks too. A prompt
+  # installed before that call had a name is timed by the same command,
+  # the same way: inside $( ), as it ran it.
+  git_us=$(RUNS=$runs bash --norc --noprofile -c "source '$src'
+               declare -F __git_status >/dev/null ||
+                 __git_status() { __GIT_STATUS=\$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null); }
+               $time_it" _ '__git_status')
   pct=$(( prompt_us > 0 ? git_us * 100 / prompt_us : 0 ))
   (( pct > 100 )) && pct=100   # separate runs; on a fast repo the noise can cross
   printf 'git status:  %6d µs of that     (%d%%)\n' "$git_us" "$pct"
