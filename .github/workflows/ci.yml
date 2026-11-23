@@ -183,6 +183,10 @@ jobs:
           if grep -qF 'rules/branches/limited' "$GHLOG"; then echo "fell back on a rate limit"; cat "$GHLOG"; exit 1; fi
           git checkout -q main
 
+          # Visibility is the repo's, not the branch's: three branches, one call.
+          n=$(grep -c ' -q .visibility' "$GHLOG")
+          [ "$n" = 1 ] || { echo "visibility fetched $n times for one repo"; cat "$GHLOG"; exit 1; }
+
           # No check runs is an answer too: it must be cached, not refetched
           # on every prompt. A fresh runtime dir starts with nothing cached.
           NO_RUNS_SHA=$(git rev-parse HEAD); export NO_RUNS_SHA
@@ -222,8 +226,12 @@ jobs:
       # and checks behaviour rather than arithmetic: line one never overlaps
       # itself, the globe never outlives `N conflicting`, and somewhere the
       # warning is kept with the globe gone. Producers are stubbed with
-      # ASCII markers so that characters are columns; the fitting is real.
+      # ASCII markers; the fitting is real. Three times: the stock PS1, a PS1
+      # overridden after sourcing, and a path whose characters are two
+      # columns wide — each measured here independently of ps1.bash.
       - name: Fitting drops segments in order, and never overlaps
+        env:
+          LC_ALL: C.UTF-8   # so that ${#s} counts characters, not bytes
         run: |
           set -euo pipefail
           source .github/ci/lib.bash
@@ -232,25 +240,35 @@ jobs:
           git -C a commit -q --allow-empty -m a; git -C a push -q origin HEAD:main
           git -C b fetch -q; git -C b checkout -q -B main origin/main
           git -C a commit -q --allow-empty -m a2; git -C a push -q origin HEAD:main
-          cd b; git commit -q --allow-empty -m b; git fetch -q
+          git -C b commit -q --allow-empty -m b; git -C b fetch -q
+          cp -a b 日本語          # the same diverged repo, under a wide name
           export PS1_ICON_AHEAD='^' PS1_ICON_BEHIND='v'
           stubs="__repo_meta_segment() { __repo_pre='G '; __repo_pre_w=2; __repo_post=''; __repo_post_w=0; }
                  __merge_segment() { __merge_out='1 conflicting  '; __merge_w=15; }
                  __gh_segment() { __gh_out='[ci]'; __gh_w=4; }"
-          l='\u@\h \w'; l=${l@P}
-          seen=0
-          for c in $(seq $(( ${#l} + 6 )) $(( ${#l} + 60 ))); do
-            out=$(COLUMNS=$c render "$stubs")
-            right=${out%%$'\n'*} left=${out##*LEFT=}
-            if [ -n "$right" ] && (( ${#l} + ${#left} + ${#right} >= c )); then
-              echo "cols=$c: the right side overlaps the left: $out"; exit 1
-            fi
-            if [[ "$left" == ' G '* && "$right" != *conflicting* ]]; then
-              echo "cols=$c: the globe outlived the conflict warning: $out"; exit 1
-            fi
-            if [[ "$right" == *conflicting* && "$left" != ' G '* ]]; then seen=1; fi
-          done
-          (( seen )) || { echo "no width kept the warning with the globe gone"; exit 1; }
+
+          # sweep <columns the left text occupies> [extra setup]
+          sweep() {
+            local lc="$1" setup="$stubs; ${2:-}" seen=0 c out right left
+            for c in $(seq $(( lc + 6 )) $(( lc + 60 ))); do
+              out=$(COLUMNS=$c render "$setup")
+              right=${out%%$'\n'*} left=${out##*LEFT=}
+              if [ -n "$right" ] && (( lc + ${#left} + ${#right} >= c )); then
+                echo "cols=$c: the right side overlaps the left: $out"; exit 1
+              fi
+              if [[ "$left" == ' G '* && "$right" != *conflicting* ]]; then
+                echo "cols=$c: the globe outlived the conflict warning: $out"; exit 1
+              fi
+              if [[ "$right" == *conflicting* && "$left" != ' G '* ]]; then seen=1; fi
+            done
+            (( seen )) || { echo "no width kept the warning with the globe gone"; exit 1; }
+          }
+
+          cd "$t/b"
+          l='\u@\h \w'; l=${l@P}; sweep ${#l}
+          l='[\t] \u@\h \w'; l=${l@P}; sweep ${#l} "PS1='[\t] '\"\$PS1\""
+          cd "$t/日本語"
+          l='\u@\h \w'; l=${l@P}; sweep $(( ${#l} + 3 ))   # 日本語: three characters, six columns
           echo "ok"
 
       # The README's measuring tool runs, inside a repo and outside one.

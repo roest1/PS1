@@ -257,12 +257,7 @@ __cache_run() {
   # shows up within a minute rather than within the TTL.
   [[ -z "$line" ]] && (( ttl > __CACHE_MISS_TTL )) && ttl=$__CACHE_MISS_TTL
 
-  # Written beside the entry and renamed over it. A prompt reading at the
-  # same moment as a plain `>` would find the file truncated and empty;
-  # rename is atomic, so it finds the old line or the new one.
-  local tmp="${cache_file}.${BASHPID}.tmp"
-  printf '%s%s\n' "${line:+$line|}" "$(( EPOCHSECONDS + ttl ))" > "$tmp" \
-    && mv -f "$tmp" "$cache_file"
+  __cache_write "$cache_file" "$line" "$ttl"
 
   # These caches are keyed, so they accumulate an entry per commit, per
   # branch, per merge. Sweeping here costs nothing; sweeping in the prompt
@@ -271,7 +266,18 @@ __cache_run() {
   # what keeps answers fresh.
   find "${cache_file%/*}" -type f -mtime +1 -delete 2>/dev/null
 
-  rm -f "${cache_file}.pending" "$tmp"
+  rm -f "${cache_file}.pending"
+}
+
+# __cache_write <file> <fields> <ttl>
+# Writes one entry: the fields, then the epoch it expires at. Written
+# beside the entry and renamed over it: a prompt reading at the same moment
+# as a plain `>` would find the file truncated and empty, where rename is
+# atomic, so it finds the old line or the new one.
+__cache_write() {
+  local tmp="$1.$BASHPID.tmp"
+  printf '%s%s\n' "${2:+$2|}" "$(( EPOCHSECONDS + $3 ))" > "$tmp" && mv -f "$tmp" "$1"
+  rm -f "$tmp"
 }
 
 # __cache_get <dir> <ttl> <key> <now> <fn> [args...]
@@ -574,7 +580,20 @@ __repo_meta_refresh() {
   local branch="$1" vis prot=0 out enc
 
   __gh_remote "$branch" || return 0
-  vis=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}" -q .visibility 2>/dev/null) || return 0
+
+  # Visibility belongs to the repo, protection to a branch, so visibility
+  # is kept in an entry of its own, keyed by the GitHub repo: every branch,
+  # worktree and clone of it shares one call per __GH_REPO_TTL, where each
+  # branch used to ask again. Read and written here, in the background,
+  # so the prompt still reads one entry per segment.
+  local vfile="$__GH_REPO_CACHE_DIR/visibility#${__gh_host}%${__gh_repo//\//%}" vexp=""
+  { IFS='|' read -r vis vexp < "$vfile"; } 2>/dev/null
+  if [[ ! "$vexp" =~ ^[0-9]+$ ]] || (( EPOCHSECONDS > vexp )); then
+    vis=$(gh api --hostname "$__gh_host" "repos/${__gh_repo}" -q .visibility 2>/dev/null) || return 0
+    case "$vis" in
+      public | private | internal) __cache_write "$vfile" "$vis" "$__GH_REPO_TTL" ;;
+    esac
+  fi
   case "$vis" in
     public | private | internal) ;;
     *) return 0 ;;
@@ -866,6 +885,79 @@ __git_state() {
   return 0
 }
 
+# ─── Display width ──────────────────────────────────────────────────
+#
+# The fitting pass adds up columns, and bash's ${#s} counts characters.
+# The two differ for East Asian Wide and Fullwidth characters — CJK, Hangul,
+# fullwidth forms, most emoji — which take two columns each, so a path or a
+# branch containing them used to measure short and the right side drew
+# over its end. Counting a combining mark or other zero-width character as
+# one column is the opposite error and is left alone: it measures LONG,
+# which costs a column of slack and never an overlap.
+#
+# The ranges are every code point Unicode 16.0.0 gives an East Asian
+# Width of W or F (EastAsianWidth.txt), generated rather than typed:
+#
+#   python3 -c 'import unicodedata as u; ...east_asian_width(chr(cp)) in ("W","F")'
+#
+# Paired arrays, sorted, so a lookup is a binary search: about seven
+# comparisons per non-ASCII character, and none at all for an ASCII string.
+__WIDE_LO=(0x1100 0x231A 0x2329 0x23E9 0x23F0 0x23F3 0x25FD 0x2614 0x2630
+  0x2648 0x267F 0x268A 0x2693 0x26A1 0x26AA 0x26BD 0x26C4 0x26CE 0x26D4 0x26EA
+  0x26F2 0x26F5 0x26FA 0x26FD 0x2705 0x270A 0x2728 0x274C 0x274E 0x2753 0x2757
+  0x2795 0x27B0 0x27BF 0x2B1B 0x2B50 0x2B55 0x2E80 0x2E9B 0x2F00 0x2FF0 0x3041
+  0x3099 0x3105 0x3131 0x3190 0x31EF 0x3220 0x3250 0xA490 0xA960 0xAC00 0xF900
+  0xFE10 0xFE30 0xFE54 0xFE68 0xFF01 0xFFE0 0x16FE0 0x16FF0 0x17000 0x18800
+  0x18CFF 0x1AFF0 0x1AFF5 0x1AFFD 0x1B000 0x1B132 0x1B150 0x1B155 0x1B164
+  0x1B170 0x1D300 0x1D360 0x1F004 0x1F0CF 0x1F18E 0x1F191 0x1F200 0x1F210
+  0x1F240 0x1F250 0x1F260 0x1F300 0x1F32D 0x1F337 0x1F37E 0x1F3A0 0x1F3CF
+  0x1F3E0 0x1F3F4 0x1F3F8 0x1F440 0x1F442 0x1F4FF 0x1F54B 0x1F550 0x1F57A
+  0x1F595 0x1F5A4 0x1F5FB 0x1F680 0x1F6CC 0x1F6D0 0x1F6D5 0x1F6DC 0x1F6EB
+  0x1F6F4 0x1F7E0 0x1F7F0 0x1F90C 0x1F93C 0x1F947 0x1FA70 0x1FA80 0x1FA8F
+  0x1FACE 0x1FADF 0x1FAF0 0x20000 0x30000)
+__WIDE_HI=(0x115F 0x231B 0x232A 0x23EC 0x23F0 0x23F3 0x25FE 0x2615 0x2637
+  0x2653 0x267F 0x268F 0x2693 0x26A1 0x26AB 0x26BE 0x26C5 0x26CE 0x26D4 0x26EA
+  0x26F3 0x26F5 0x26FA 0x26FD 0x2705 0x270B 0x2728 0x274C 0x274E 0x2755 0x2757
+  0x2797 0x27B0 0x27BF 0x2B1C 0x2B50 0x2B55 0x2E99 0x2EF3 0x2FD5 0x303E 0x3096
+  0x30FF 0x312F 0x318E 0x31E5 0x321E 0x3247 0xA48C 0xA4C6 0xA97C 0xD7A3 0xFAFF
+  0xFE19 0xFE52 0xFE66 0xFE6B 0xFF60 0xFFE6 0x16FE4 0x16FF1 0x187F7 0x18CD5
+  0x18D08 0x1AFF3 0x1AFFB 0x1AFFE 0x1B122 0x1B132 0x1B152 0x1B155 0x1B167
+  0x1B2FB 0x1D356 0x1D376 0x1F004 0x1F0CF 0x1F18E 0x1F19A 0x1F202 0x1F23B
+  0x1F248 0x1F251 0x1F265 0x1F320 0x1F335 0x1F37C 0x1F393 0x1F3CA 0x1F3D3
+  0x1F3F0 0x1F3F4 0x1F43E 0x1F440 0x1F4FC 0x1F53D 0x1F54E 0x1F567 0x1F57A
+  0x1F596 0x1F5A4 0x1F64F 0x1F6C5 0x1F6CC 0x1F6D2 0x1F6D7 0x1F6DF 0x1F6EC
+  0x1F6FC 0x1F7EB 0x1F7F0 0x1F93A 0x1F945 0x1F9FF 0x1FA7C 0x1FA89 0x1FAC6
+  0x1FADC 0x1FAE9 0x1FAF8 0x2FFFD 0x3FFFD)
+
+# __display_width <string>
+# Sets __DW to the columns <string> occupies. Spends no processes.
+#
+# Only the non-ASCII characters are visited: deleting the ASCII ones
+# leaves, for a typical path, nothing — and walking a UTF-8 string with
+# ${s:i:1} is quadratic, which made a long path with one CJK name in it
+# cost most of a millisecond. The caller also remembers the answer for as
+# long as the string stays the same, so this runs once per directory.
+__display_width() {
+  local rest="${1//[[:ascii:]]/}" c cp lo hi mid i extra=0
+  __DW=${#1}
+  for (( i = 0; i < ${#rest}; i++ )); do
+    c="${rest:i:1}"
+    # The code point, in a UTF-8 locale. In any other, bytes, all below
+    # the first wide range, so the string simply measures as it did.
+    printf -v cp '%d' "'$c"
+    lo=0 hi=$(( ${#__WIDE_LO[@]} - 1 ))
+    while (( lo <= hi )); do
+      mid=$(( (lo + hi) / 2 ))
+      if   (( cp < __WIDE_LO[mid] )); then hi=$(( mid - 1 ))
+      elif (( cp > __WIDE_HI[mid] )); then lo=$(( mid + 1 ))
+      else (( ++extra )); break
+      fi
+    done
+  done
+  (( __DW += extra ))
+  return 0
+}
+
 # ─── The prompt ─────────────────────────────────────────────────────
 #
 # Sets __PS1_CONDA and __PS1_GIT for PS1 to read, then prints the right
@@ -1070,22 +1162,44 @@ __prompt_draw() {
   # the path, the machine name or the conda env to make room for a status
   # glyph is a bad trade — those are how you know WHERE you are.
   #
-  # Measured by having bash expand the very escapes PS1 uses: ${x@P} is
-  # prompt expansion as a parameter operator, so no fork. Re-deriving them
-  # by hand was close but not equal — it turned /home/you2 into ~2, which
-  # \w does not, read $USER where \u asks the password database, and knew
-  # nothing of PROMPT_DIRTRIM. (Wide CJK characters in a path still count
-  # as one column each; bash has no way to ask.)
-  local ltext='\u@\h \w' lw
+  # Measured off PS1 itself: the part before ${__PS1_GIT} — or before its
+  # first line break, for a PS1 with no branch in it — expanded by ${x@P},
+  # which is bash's own prompt expansion as a parameter operator, so no
+  # fork. What is invisible goes first: PS1's own \[ ... \] spans are cut
+  # from the template (${x@P} drops the markers but keeps what they wrap),
+  # then the \001..\002 runs that variables such as __PS1_CONDA carry.
+  # One template, so neither editing PS1 nor overriding it after sourcing
+  # can skew the fitting. This used to keep a copy of its own, '\u@\h \w',
+  # plus a hand count for the conda prefix; before that it re-derived
+  # \u \h \w by hand, which turned /home/you2 into ~2.
+  local ltext="${PS1%%'${__PS1_GIT}'*}"
+  ltext="${ltext%%'\n'*}"
+  while [[ "$ltext" == *'\['*'\]'* ]]; do
+    ltext="${ltext%%'\['*}${ltext#*'\]'}"
+  done
   ltext="${ltext@P}"
-  (( lw = ${#ltext} ))
-  [[ -n "$CONDA_DEFAULT_ENV" ]] && (( lw += ${#CONDA_DEFAULT_ENV} + 3 ))
+  while [[ "$ltext" == *$'\001'*$'\002'* ]]; do
+    ltext="${ltext%%$'\001'*}${ltext#*$'\002'}"
+  done
+  # Columns, not characters (see __display_width), and remembered until
+  # the text changes — in practice, until you cd.
+  if [[ "$ltext" != "${__LW_FOR-}" ]]; then
+    __display_width "$ltext"
+    __LW_FOR="$ltext" __LW=$__DW
+  fi
+  local lw=$__LW
 
   # The branch and its two decorations sit on the left as well, and are
   # the only part of it that may go. An operation in progress is part of
   # the branch — `main|MERGING` — and goes with it, never before it.
   local r_branch="$head" w_branch=0
-  [[ -n "$head" ]] && (( w_branch = ${#head} + 1 ))
+  if [[ -n "$head" ]]; then
+    if [[ "$head" != "${__HW_FOR-}" ]]; then
+      __display_width "$head"
+      __HW_FOR="$head" __HW=$__DW
+    fi
+    (( w_branch = __HW + 1 ))
+  fi
   [[ -n "$__git_op" ]] && (( w_branch += ${#__git_op} + 1 ))
 
   # Least useful goes first. The order is deliberate and runs roughly
