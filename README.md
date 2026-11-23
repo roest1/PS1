@@ -135,10 +135,10 @@ your machine:
 | Where | Per Enter | Of which `git status` |
 |---|---|---|
 | outside any repo | 0.1 ms | — (not run) |
-| this repo | 5.4 ms | 3.2 ms (59%) |
-| a repo with one submodule | 8.1 ms | 6.1 ms (74%) |
+| this repo | 4.3 ms | 3.0 ms (69%) |
+| a repo with one submodule | 9.9 ms | 8.6 ms (87%) |
 
-The rest, about 2 ms, is bash reading the caches and building the line, and it is the
+The rest, about 1.3 ms, is bash reading the caches and building the line, and it is the
 same in every repo. `git status` is the part that grows: with tracked files, untracked
 directories, and one more `git` for each submodule.
 
@@ -149,9 +149,9 @@ systemd's terminal hook (see [How your prompt is built](docs/how-your-prompt-is-
 | Prompt | Per Enter |
 |---|---|
 | Fedora's stock prompt, no git information | 1.2 ms |
-| + git's own `__git_ps1`, branch only | 6.3 ms |
-| **+ ps1.bash**, everything above plus GitHub | **6.7 ms** |
-| + `__git_ps1` with dirty, untracked and upstream | 21.2 ms |
+| **+ ps1.bash**: branch, dirty state, ahead/behind, conflicts, GitHub | **5.8 ms** |
+| + git's own `__git_ps1`, branch only | 6.6 ms |
+| + `__git_ps1` with dirty, untracked and upstream | 22.6 ms |
 
 To measure your own, from the directory you care about:
 
