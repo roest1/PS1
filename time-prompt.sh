@@ -57,9 +57,13 @@ printf 'prompt:      %6d µs per Enter   (%d runs in %s)\n' "$prompt_us" "$runs"
 in_repo=0
 git rev-parse --is-inside-work-tree &>/dev/null && in_repo=1
 if (( in_repo )); then
-  # The same command, the same way: inside $( ), as the prompt runs it.
-  git_us=$(RUNS=$runs bash --norc --noprofile -c "$time_it" _ \
-             'st=$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null)')
+  # The prompt's own call, so whatever it asks git, this asks too. A prompt
+  # installed before that call had a name is timed by the same command,
+  # the same way: inside $( ), as it ran it.
+  git_us=$(RUNS=$runs bash --norc --noprofile -c "source '$src'
+               declare -F __git_status >/dev/null ||
+                 __git_status() { __GIT_STATUS=\$(exec git --no-optional-locks status --porcelain=v2 --branch 2>/dev/null); }
+               $time_it" _ '__git_status')
   pct=$(( prompt_us > 0 ? git_us * 100 / prompt_us : 0 ))
   (( pct > 100 )) && pct=100   # separate runs; on a fast repo the noise can cross
   printf 'git status:  %6d µs of that     (%d%%)\n' "$git_us" "$pct"
@@ -103,18 +107,21 @@ for f in /usr/share/git-core/contrib/completion/git-prompt.sh \
   [[ -f "$f" ]] && { git_prompt="$f"; break; }
 done
 
+# row <label> <setup>: one line of the table.
+row() { printf '  %-46s %6d µs\n' "$1" "$(whole "$2")"; }
+
 echo
 echo "Whole prompt per Enter, on top of this system's stock setup:"
-printf '  %-46s %6d µs\n' "stock prompt alone" "$(whole ':')"
-printf '  %-46s %6d µs\n' "+ ps1.bash" "$(whole "source '$src'")"
+row "stock prompt alone" ':'
+row "+ ps1.bash" "source '$src'"
 if [[ -n "$git_prompt" ]]; then
   gp="source '$git_prompt'; PROMPT_COMMAND+=('__git_ps1 \"\\u@\\h \\w\" \"\\\\\$ \"')"
   if (( in_repo )); then
-    printf '  %-46s %6d µs\n' "+ git's __git_ps1, branch only" "$(whole "$gp")"
-    printf '  %-46s %6d µs\n' "+ __git_ps1 with dirty, untracked, upstream" \
-      "$(whole "GIT_PS1_SHOWDIRTYSTATE=1 GIT_PS1_SHOWUNTRACKEDFILES=1 GIT_PS1_SHOWUPSTREAM=auto; $gp")"
+    row "+ git's __git_ps1, branch only" "$gp"
+    row "+ __git_ps1 with dirty, untracked, upstream" \
+      "GIT_PS1_SHOWDIRTYSTATE=1 GIT_PS1_SHOWUNTRACKEDFILES=1 GIT_PS1_SHOWUPSTREAM=auto; $gp"
   else
-    printf '  %-46s %6d µs\n' "+ git's __git_ps1" "$(whole "$gp")"
+    row "+ git's __git_ps1" "$gp"
   fi
   echo "  (__git_ps1 from $git_prompt)"
 else
