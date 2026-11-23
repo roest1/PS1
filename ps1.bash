@@ -282,7 +282,8 @@ __cache_write() {
 
 # __cache_get <dir> <ttl> <key> <now> <fn> [args...]
 # Sets __CACHE_FIELDS to the producer's fields for this key, empty when
-# there is none yet or it had no answer, and launches <fn> detached when
+# there is none yet or it had no answer, and __CACHE_EXPIRES to the epoch
+# the entry expires at (0 when there is none). Launches <fn> detached when
 # the entry has expired. Spends no processes: `read` is a builtin and the
 # expiry is arithmetic.
 #
@@ -315,6 +316,7 @@ __cache_get() {
   case "$__cg_expires" in
     '' | *[!0-9]*) __cg_expires=0 ;;
   esac
+  __CACHE_EXPIRES=$__cg_expires
 
   (( __cg_now > __cg_expires )) || return 0
 
@@ -480,6 +482,16 @@ __gh_refresh() {
       ] | map(tostring) | join("|")' <<< "$result" 2>/dev/null
 }
 
+# Both GitHub segments remember what they read, in the shell, until the
+# entry it came from expires. Until then the file cannot have changed —
+# only a refresh rewrites it, and a refresh is only launched once the
+# entry has expired — so reading it again, splitting it and building the
+# same text again was the whole of their cost on a normal Enter: ~190us
+# and ~250us, against a string comparison now. An entry still being
+# fetched has no expiry yet, so the next prompt reads the file again and
+# picks the answer up the moment it lands. The memo key is the worktree
+# plus the branch or sha, joined by \001, which cannot occur in a ref name.
+
 # __gh_segment <sha> <branch> <now_epoch>
 # Sets __gh_out (the rendered segment) and __gh_w (its width in columns).
 # Spends no processes: `read` is a builtin and the age is arithmetic.
@@ -494,6 +506,32 @@ __gh_segment() {
   [[ -n "$sha" ]] || return
   (( __HAS_GH && __HAS_JQ )) || return
 
+  # Everything but the age is remembered: the age is relative to now, and
+  # remembering it would freeze "4m" for up to a minute.
+  local memo="${__GIT_TOPLEVEL:-$PWD}"$'\001'"$sha"
+  if [[ "$memo" != "${__GS_MEMO-}" ]] || (( now > __GS_EXPIRES )); then
+    __gh_read "$sha" "$branch" "$now"
+    __GS_MEMO="$memo" __GS_EXPIRES=$__CACHE_EXPIRES
+  fi
+  [[ -n "$__GS_HEAD" ]] || return
+
+  local age=""
+  [[ -n "$__GS_RUN" ]] && __relative_age age "$__GS_RUN" "$now"
+
+  __gh_out="${__C_GH}[${__GS_HEAD} ${age}]${__C_OFF}"
+  # Visible: [ head <space> age ] — the brackets and the space are 3.
+  __gh_w=$(( __GS_HEAD_W + ${#age} + 3 ))
+}
+
+# __gh_read <sha> <branch> <now_epoch>
+# The part of __gh_segment that is remembered: reads the entry and sets
+# __GS_HEAD, the segment's text up to its age ("5/5 ✅ (1 skipped)"),
+# empty when there is nothing to show; __GS_HEAD_W, its width; and
+# __GS_RUN, the run's epoch or empty.
+__gh_read() {
+  local sha="$1" branch="$2" now="$3"
+  __GS_HEAD="" __GS_HEAD_W=0 __GS_RUN=""
+
   local key="${__GIT_TOPLEVEL:-$PWD}"
   key="${key//\//%}#${sha}"
   __cache_get "$__GH_CACHE_DIR" "$__GH_TTL" "$key" "$now" __gh_refresh "$sha" "$branch"
@@ -501,7 +539,7 @@ __gh_segment() {
   local s="${__CACHE_FIELDS[0]}" t="${__CACHE_FIELDS[1]}" sym="${__CACHE_FIELDS[2]}"
   local run_epoch="${__CACHE_FIELDS[3]}" skipped="${__CACHE_FIELDS[4]}"
 
-  [[ -n "$s" && -n "$t" ]] || return
+  [[ -n "$s" && -n "$t" ]] || return 0
 
   # Both of these reach `(( ))` below, and an entry written by an older
   # version of this file, or a damaged one, need not have the shape this
@@ -530,13 +568,11 @@ __gh_segment() {
   local skipped_str=""
   (( skipped > 0 )) && skipped_str=" (${skipped} skipped)"
 
-  local age=""
-  [[ -n "$run_epoch" ]] && __relative_age age "$run_epoch" "$now"
-
-  __gh_out="${__C_GH}[${s}/${t} ${emoji}${skipped_str} ${age}]${__C_OFF}"
-  # Visible: [ s / t <space> icon <skipped> <space> age ] — the two
-  # brackets, the slash and the two spaces are 5, plus the icon's width.
-  __gh_w=$(( ${#s} + ${#t} + ${#skipped_str} + ${#age} + 5 + emoji_w ))
+  __GS_HEAD="${s}/${t} ${emoji}${skipped_str}"
+  # Visible: s / t <space> icon <skipped> — the slash and the space are 2.
+  __GS_HEAD_W=$(( ${#s} + ${#t} + 2 + emoji_w + ${#skipped_str} ))
+  __GS_RUN="$run_epoch"
+  return 0
 }
 
 # ─── Repo visibility and branch protection ──────────────────────────
@@ -640,6 +676,14 @@ __repo_meta_segment() {
   local branch="$1" now="$2"
   (( __HAS_GH )) || return
 
+  # Nothing here depends on the clock, so the whole result is remembered.
+  local memo="${__GIT_TOPLEVEL:-$PWD}"$'\001'"$branch"
+  if [[ "$memo" == "${__RM_MEMO-}" ]] && (( now <= __RM_EXPIRES )); then
+    __repo_pre="$__RM_PRE"   __repo_pre_w=$__RM_PRE_W
+    __repo_post="$__RM_POST" __repo_post_w=$__RM_POST_W
+    return 0
+  fi
+
   # Slashes become % so that a path and a branch like feature/foo compose
   # into one file name; __cache_get shortens one that is too long.
   local key="${__GIT_TOPLEVEL:-$PWD}"
@@ -660,6 +704,10 @@ __repo_meta_segment() {
   esac
   [[ "$prot" == "1" && -n "$__I_PROTECTED" ]] \
     && { __repo_post=" $__I_PROTECTED"; __repo_post_w=$(( __IW_PROTECTED + 1 )); }
+
+  __RM_MEMO="$memo" __RM_EXPIRES=$__CACHE_EXPIRES
+  __RM_PRE="$__repo_pre"   __RM_PRE_W=$__repo_pre_w
+  __RM_POST="$__repo_post" __RM_POST_W=$__repo_post_w
   return 0
 }
 

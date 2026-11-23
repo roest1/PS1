@@ -217,6 +217,52 @@ jobs:
           [ -s "$GHLOG" ] || { echo "gh was never used after PATH gained it"; exit 1; }
           echo "ok"
 
+      # Within one shell the GitHub segments remember what they read. Moving
+      # between repos and branches must never show one's markers on another,
+      # and an answer that was still being fetched must appear on the next
+      # Enter rather than be remembered as "nothing yet".
+      - name: Remembers per repo and branch, within one shell
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d); mkdir "$t/bin"
+          cat > "$t/bin/gh" <<'EOF'
+          #!/bin/bash
+          case "$*" in
+            *"repos/me/app -q .visibility") echo public ;;
+            *"repos/me/lib -q .visibility") echo private ;;
+            *"repos/me/app/branches/main -q .protected") echo true ;;
+            *"/branches/"*) echo false ;;
+            *"/commits/"*) echo '{"check_runs":[{"status":"completed","conclusion":"success","completed_at":"2026-01-01T00:00:00Z"}]}' ;;
+          esac
+          EOF
+          chmod +x "$t/bin/gh"
+          export PATH="$t/bin:$PATH" XDG_RUNTIME_DIR="$t/run"
+          for r in app lib; do
+            git init -q -b main "$t/$r"; git -C "$t/$r" commit -q --allow-empty -m one
+            git -C "$t/$r" remote add origin "git@github.com:me/$r.git"
+          done
+          git -C "$t/app" branch -q topic
+          out=$(bash --norc --noprofile -c "
+            source '$GITHUB_WORKSPACE/ps1.bash'; COLUMNS=200
+            show()   { __prompt_render >/dev/null; printf '%s=%s\n' \"\$1\" \"\$__PS1_GIT\"; }
+            settle() { for _ in \$(seq 50); do [ -n \"\$(find '$t/run' -name '*.pending' 2>/dev/null)\" ] || break; sleep 0.1; done; }
+            cd '$t/app'; show app-first; settle; show app-second
+            cd '$t/lib'; __prompt_render >/dev/null; settle
+            cd '$t/app'; git checkout -q topic; __prompt_render >/dev/null; settle; git checkout -q main
+            cd '$t/app'; show app-main
+            cd '$t/lib'; show lib-main
+            cd '$t/app'; git checkout -q topic; show app-topic
+            git checkout -q main; show app-main-again
+            printf 'right=%s\n' \"\$(__prompt_render)\"
+          " | sed 's/\x1b\[[0-9;]*[mG]//g; s/[\x01\x02\r]//g')
+          echo "$out"
+          for want in 'app-first= main' 'app-second= 🌍 main 🛡️' 'app-main= 🌍 main 🛡️' 'lib-main= 🔒 main' \
+                      'app-topic= 🌍 topic' 'app-main-again= 🌍 main 🛡️'; do
+            grep -qxF "$want" <<<"$out" || { echo "missing: $want"; exit 1; }
+          done
+          grep -qF '[1/1 ✅' <<<"$out" || { echo "CI block missing"; exit 1; }
+          echo "ok"
+
       # A cache key carries the repo's path, and a path deeper than a file
       # name can be must still cache: one refresh, not one per Enter.
       - name: Deep paths still cache
@@ -302,6 +348,12 @@ jobs:
           git init -q r; cd r
           out=$("$GITHUB_WORKSPACE/time-prompt.sh" 3); echo "$out"
           grep -qE '^git status: +[0-9]+ µs' <<<"$out"
+          # --compare: every row present and a number, here where git-prompt.sh exists.
+          out=$("$GITHUB_WORKSPACE/time-prompt.sh" --compare 3); echo "$out"
+          for row in 'stock prompt alone' '+ ps1.bash' "+ git's __git_ps1, branch only" '+ __git_ps1 with dirty'; do
+            grep -qF -- "$row" <<<"$out" || { echo "missing row: $row"; exit 1; }
+          done
+          if grep -qE ' 0 µs$' <<<"$out"; then echo "a comparison measured nothing"; exit 1; fi
 
       # The caches must never be a fixed name in a shared /tmp (see ps1.bash).
       - name: No cache in a shared /tmp
