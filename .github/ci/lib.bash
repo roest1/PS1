@@ -1,5 +1,24 @@
-# Sourced by the steps in ../workflows/ci.yml. Steps cannot share shell
-# functions, so they share this file instead.
+# Sourced by the steps in ../workflows/ci.yml, and by perf.bash. Steps
+# cannot share shell functions, so they share this file instead.
+
+# strip
+# Removes colours, cursor moves and readline's zero-width markers from
+# what it is piped.
+strip() { sed 's/\x1b\[[0-9;]*[mG]//g; s/[\x01\x02\r]//g'; }
+
+# settle
+# Waits until no background refresh is running under $XDG_RUNTIME_DIR, and
+# fails the step if one never finishes. ps1.bash writes the marker this
+# looks for before it starts the refresh, so there is no gap to miss one in.
+settle() {
+  local i
+  for (( i = 0; i < 100; i++ )); do
+    [ -n "$(find "$XDG_RUNTIME_DIR" -name '*.pending' 2>/dev/null)" ] || return 0
+    sleep 0.05
+  done
+  echo "a background refresh never finished" >&2
+  exit 1
+}
 
 # render [setup]
 # Draws one prompt the way bash would, in a clean shell: sources ps1.bash,
@@ -10,8 +29,7 @@ render() {
   COLUMNS="${COLUMNS:-200}" bash --norc --noprofile -c "
     source '$GITHUB_WORKSPACE/ps1.bash'
     ${1:-}
-    __prompt_render; printf '\nLEFT=%s\n' \"\$__PS1_GIT\"" 2>&1 \
-    | sed 's/\x1b\[[0-9;]*[mG]//g; s/[\x01\x02\r]//g'
+    __prompt_render; printf '\nLEFT=%s\n' \"\$__PS1_GIT\"" 2>&1 | strip
 }
 
 # want <text>
