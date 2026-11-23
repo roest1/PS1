@@ -422,6 +422,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: shellcheck --severity=warning ps1.bash time-prompt.sh .github/ci/lib.bash .github/ci/perf.bash
+      # ps1.bash is installed verbatim into every $HOME, and this repo is public:
+      # a /home/<name> path, even in a comment, breaks elsewhere and names someone.
+      # Same rule as dotfiles' tools/check-content.sh, which pins this repo.
+      - name: No absolute home paths
+        run: |
+          if git grep -nIE '(/home/|/Users/)[A-Za-z][A-Za-z0-9._-]*' -- . | grep -v '/home/linuxbrew'; then
+            echo "Use \$HOME or ~ instead of an absolute home path."; exit 1
+          fi
 
   # The one check the main ruleset requires, so adding or renaming a job above
   # never means editing the ruleset. `if: always()` so a failed or skipped
